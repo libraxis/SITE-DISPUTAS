@@ -173,6 +173,90 @@ async function fetchJson(url) {
   throw lastError || new Error("Falha desconhecida ao consultar o PNCP.");
 }
 
+
+async function fetchText(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+  let lastError;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Accept: "text/html,application/xhtml+xml",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+          Referer: "https://pncp.gov.br/app/editais"
+        },
+        signal: controller.signal
+      });
+      const body = await response.text();
+      if (!response.ok) {
+        const error = new Error(`PNCP portal HTTP ${response.status}: ${body.slice(0, 300)}`);
+        error.status = response.status;
+        throw error;
+      }
+      return body;
+    } catch (error) {
+      lastError = error;
+      const retryable = error.name === "AbortError" || [429, 500, 502, 503, 504].includes(error.status);
+      if (!retryable || attempt === RETRIES) throw error;
+      await new Promise(resolve => setTimeout(resolve, 700 * attempt));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError || new Error("Falha ao consultar a página pública do PNCP.");
+}
+
+async function searchPortalHtmlFallback(uf, keyword, diagnostics) {
+  const ids = new Set();
+  const pages = Math.min(SEARCH_MAX_PAGES, 10);
+  const pageResults = [];
+  for (let pagina = 1; pagina <= pages; pagina++) {
+    const params = new URLSearchParams({
+      q: keyword,
+      status: "recebendo_proposta",
+      pagina: String(pagina)
+    });
+    if (uf) params.set("ufs", uf);
+    const html = await fetchText(`${PNCP_PORTAL}?${params}`);
+    const matches = html.match(/\b\d{14}-\d-\d{6}\/\d{4}\b/g) || [];
+    const uniquePage = [...new Set(matches)];
+    uniquePage.forEach(id => ids.add(id));
+    pageResults.push({ pagina, encontrados: uniquePage.length });
+    if (!uniquePage.length || uniquePage.length < 10) break;
+  }
+
+  const candidates = [...ids];
+  const details = [];
+  const concurrency = 8;
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const index = cursor++;
+      if (index >= candidates.length) return;
+      const controle = candidates[index];
+      try {
+        const base = normalizeProcesso({ numeroControlePNCP: controle });
+        if (!base.cnpjCompra || !base.anoCompra || !base.sequencialCompra) continue;
+        const data = await fetchJson(buildCompraApiUrl(base));
+        const processo = normalizeProcesso(data || { numeroControlePNCP: controle });
+        if (isDivulgada(processo) && isOpen(processo) && (!uf || processo.uf === uf) && matches(processo, keyword)) details.push(processo);
+      } catch (_) {}
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, candidates.length) }, worker));
+
+  diagnostics.htmlFallback = {
+    endpoint: PNCP_PORTAL,
+    paginasLidas: pageResults.length,
+    paginas: pageResults,
+    idsEncontrados: candidates.length,
+    detalhesConsultados: candidates.length,
+    encontrados: details.length
+  };
+  return details;
+}
+
 function normalizeProcesso(item, modalidadeFallback = null) {
   const org = item?.orgaoEntidade || item?.orgao || item?.entidade || {};
   const unidade = item?.unidadeOrgao || item?.unidadeAdministrativa || {};
@@ -1268,10 +1352,25 @@ app.get("/api/processos", async (req, res) => {
     try {
       const fallback = await fallbackPropostaApi(uf, keyword, diagnostics);
       processos.push(...fallback);
-      if (primaryError) diagnostics.warnings.push("Fallback /contratacoes/proposta executado.");
+      diagnostics.warnings.push("Fallback /contratacoes/proposta executado.");
     } catch (error) {
-      diagnostics.fallback = { erro: error.message, status: error.status || null };
+      diagnostics.fallback = { ...(diagnostics.fallback || {}), erro: error.message, status: error.status || null };
       diagnostics.warnings.push(`Fallback /contratacoes/proposta: ${error.message}`);
+    }
+  }
+
+  // Último recurso: se as APIs de consulta estiverem indisponíveis ou retornarem zero,
+  // consulta a própria página pública de Editais do PNCP, extrai os IDs das contratações
+  // exibidas e consulta cada contratação individualmente. Isso evita que uma indisponibilidade
+  // temporária do /api/search derrube a pesquisa inteira.
+  if (processos.length === 0) {
+    try {
+      const htmlFallback = await searchPortalHtmlFallback(uf, keyword, diagnostics);
+      processos.push(...htmlFallback);
+      diagnostics.warnings.push("Fallback pela página pública de Editais do PNCP executado.");
+    } catch (error) {
+      diagnostics.htmlFallback = { erro: error.message, status: error.status || null };
+      diagnostics.warnings.push(`Fallback pela página pública do PNCP: ${error.message}`);
     }
   }
 
