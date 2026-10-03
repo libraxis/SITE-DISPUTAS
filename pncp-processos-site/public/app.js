@@ -116,6 +116,22 @@ function render() {
     `;
 }
 
+function renderDiagnostics(data) {
+  const box = $("#diagnostics");
+  if (!box) return;
+
+  const c = data?.consulta || {};
+  $("#diagResponse").textContent = data?.warnings?.length ? "COM AVISOS/ERROS" : "OK";
+  $("#diagRaw").textContent = Number(c.rawTotal ?? 0).toLocaleString("pt-BR");
+  $("#diagDivulgada").textContent = Number(c.divulgadaTotal ?? 0).toLocaleString("pt-BR");
+  $("#diagAbertos").textContent = Number(c.abertosTotal ?? 0).toLocaleString("pt-BR");
+  $("#diagFound").textContent = Number(c.encontradosTotal ?? 0).toLocaleString("pt-BR");
+  $("#diagTime").textContent = `${Math.round((c.durationMs || 0) / 1000)}s`;
+  $("#officialSearch").href = data?.portalUrl || "https://pncp.gov.br/app/editais";
+  $("#diagDetails").textContent = JSON.stringify(c, null, 2);
+  box.classList.remove("hidden");
+}
+
 async function search(event) {
   event?.preventDefault();
 
@@ -133,6 +149,7 @@ async function search(event) {
   $("#loading").classList.remove("hidden");
   $("#results").classList.add("hidden");
   $("#stats").classList.add("hidden");
+  $("#diagnostics").classList.add("hidden");
   $("#notice").classList.add("hidden");
 
   $("#progress").textContent =
@@ -144,6 +161,7 @@ async function search(event) {
     );
 
     processos = data.processos || [];
+    renderDiagnostics(data);
 
     $("#statTotal").textContent = processos.length;
     $("#statUf").textContent = uf || "Todas";

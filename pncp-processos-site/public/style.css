@@ -59,3 +59,13 @@ input:focus,select:focus,textarea:focus{border-color:#6b8ee8;box-shadow:0 0 0 3p
 .supplier-search{align-items:stretch}
 .supplier-search button{width:100%}
 }
+
+.diag-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:14px 0}
+.diag-grid>div{border:1px solid #dbe3ef;border-radius:12px;padding:12px;background:#f8fafc}
+.diag-grid span{display:block;color:#667085;font-size:12px;margin-bottom:5px}
+.diag-grid strong{font-size:20px;color:#0b1f3a}
+#diagnostics details{border-top:1px solid #e5e7eb;padding-top:12px}
+#diagnostics summary{cursor:pointer;font-weight:700;color:#334155}
+#diagDetails{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:14px;margin-top:10px;font-size:12px}
+@media(max-width:800px){.diag-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){.diag-grid{grid-template-columns:1fr}}

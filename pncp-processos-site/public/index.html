@@ -100,6 +100,28 @@
 
       <div id="notice" class="notice hidden"></div>
 
+      <div id="diagnostics" class="card hidden">
+        <div class="card-head">
+          <div>
+            <div class="eyebrow">DIAGNÓSTICO DA CONSULTA</div>
+            <h3>O que o PNCP respondeu</h3>
+          </div>
+          <a id="officialSearch" class="ghost" href="#" target="_blank" rel="noopener">Abrir pesquisa oficial do PNCP</a>
+        </div>
+        <div class="diag-grid">
+          <div><span>Resposta do PNCP</span><strong id="diagResponse">—</strong></div>
+          <div><span>Registros recebidos</span><strong id="diagRaw">—</strong></div>
+          <div><span>Divulgada no PNCP</span><strong id="diagDivulgada">—</strong></div>
+          <div><span>Abertos</span><strong id="diagAbertos">—</strong></div>
+          <div><span>Encontrados pelo termo</span><strong id="diagFound">—</strong></div>
+          <div><span>Tempo da consulta</span><strong id="diagTime">—</strong></div>
+        </div>
+        <details>
+          <summary>Detalhes técnicos</summary>
+          <pre id="diagDetails"></pre>
+        </details>
+      </div>
+
       <div id="stats" class="stats hidden">
         <div class="stat">
           <span>Processos encontrados</span>
