@@ -10,6 +10,7 @@ const PNCP_SEARCH = "https://pncp.gov.br/api/search/";
 // API oficial de consulta, usada como fallback.
 const PNCP_PROPOSTA = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
 const PNCP_PORTAL = "https://pncp.gov.br/app/editais";
+const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 
 const CACHE_MS = 2 * 60 * 1000;
 const SEARCH_PAGE_SIZE = 50;
@@ -141,15 +142,23 @@ function normalizeProcesso(item, modalidadeFallback = null) {
     "cnpjOrgao"
   ) || pick(org, "cnpj", "cnpjOrgao") || "").replace(/\D/g, "");
 
-  const ano = String(pick(item, "anoCompra", "ano", "ano_compra") || "");
-  const seq = String(pick(item, "sequencialCompra", "sequencial", "sequencial_compra") || "");
+  let ano = String(pick(item, "anoCompra", "ano", "ano_compra") || "");
+  let seq = String(pick(item, "sequencialCompra", "sequencial", "sequencial_compra") || "");
+  let parsedCnpj = cnpj;
+  const controleMatch = controle.match(/^(.+?)-1-(\d+)\/(\d{4})$/);
+  if (controleMatch) {
+    parsedCnpj = parsedCnpj || controleMatch[1];
+    seq = seq || controleMatch[2];
+    ano = ano || controleMatch[3];
+  }
 
   let link = item?.item_url || item?.url || item?.link || "";
   if (link && link.startsWith("/")) {
     link = link.replace(/^\/compras/, "");
     link = `${PNCP_PORTAL}${link.startsWith("/") ? link : `/${link}`}`;
   }
-  if (!link && controle) link = `${PNCP_PORTAL}`;
+  if (!link && parsedCnpj && ano && seq) link = `${PNCP_PORTAL}/${encodeURIComponent(parsedCnpj)}/${encodeURIComponent(ano)}/${encodeURIComponent(seq)}`;
+  if (!link && controle) link = PNCP_PORTAL;
 
   const modalidadeCodigo = Number(
     item?.modalidade_id ?? item?.modalidadeId ?? item?.modalidade_licitacao_id ?? modalidadeFallback
@@ -157,6 +166,9 @@ function normalizeProcesso(item, modalidadeFallback = null) {
 
   return {
     controlePncp: controle,
+    cnpjCompra: parsedCnpj,
+    anoCompra: ano,
+    sequencialCompra: seq,
     numero: pick(item, "numero_compra", "numeroCompra", "numeroEdital", "numero", "processo", "numeroProcesso") || controle || "Processo PNCP",
     processo: pick(item, "processo", "numeroProcesso") || "",
     orgao: pick(item, "orgao_nome", "orgaoNome", "razaoSocial") || org?.razaoSocial || org?.razaoSocialOrgao || org?.nome || "Órgão não informado",
@@ -174,7 +186,22 @@ function normalizeProcesso(item, modalidadeFallback = null) {
     publicacao: pick(item, "data_publicacao_pncp", "dataPublicacaoPNCP", "dataDivulgacaoPncp", "data_publicacao") || null,
     valor: pick(item, "valor_global", "valorTotalEstimado", "valor_estimado", "valorEstimado") ?? null,
     fonte: pick(item, "fonte_plataforma", "fontePlataforma", "usuario_nome") || "",
-    link: link || PNCP_PORTAL
+    tipoInstrumentoConvocatorioId: item?.tipoInstrumentoConvocatorioId ?? item?.tipo_instrumento_convocatorio_id ?? null,
+    tipoInstrumentoConvocatorioNome: pick(item, "tipoInstrumentoConvocatorioNome", "tipo_instrumento_convocatorio_nome") || "",
+    modoDisputaId: item?.modoDisputaId ?? item?.modo_disputa_id ?? null,
+    modoDisputaNome: pick(item, "modoDisputaNome", "modo_disputa_nome") || "",
+    srp: item?.srp ?? item?.registroPreco ?? item?.registroPrecos ?? null,
+    amparoLegalNome: pick(item, "amparoLegalNome", "amparo_legal_nome") || "",
+    amparoLegalDescricao: pick(item, "amparoLegalDescricao", "amparo_legal_descricao") || "",
+    valorHomologado: pick(item, "valorTotalHomologado", "valor_total_homologado") ?? null,
+    dataAtualizacao: pick(item, "dataAtualizacao", "data_atualizacao") || null,
+    dataInclusao: pick(item, "dataInclusao", "data_inclusao") || null,
+    poderId: org?.poderId || item?.poderId || null,
+    esferaId: org?.esferaId || item?.esferaId || null,
+    codigoUnidade: unidade?.codigoUnidade || item?.codigoUnidade || "",
+    ufNome: unidade?.ufNome || item?.ufNome || "",
+    municipioId: unidade?.municipioId || item?.municipioId || null,
+    link: link || (controle ? `${PNCP_PORTAL}/${encodeURIComponent(controle)}` : PNCP_PORTAL)
   };
 }
 
@@ -412,6 +439,128 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
   return found;
 }
 
+
+function buildCompraApiUrl(processo, suffix = "") {
+  const cnpj = String(processo?.cnpjCompra || "").trim();
+  const ano = String(processo?.anoCompra || "").trim();
+  const seq = String(processo?.sequencialCompra || "").trim();
+  if (!cnpj || !/^\d{4}$/.test(ano) || !/^\d+$/.test(seq)) return null;
+  return `${PNCP_API_BASE}/v1/orgaos/${encodeURIComponent(cnpj)}/compras/${encodeURIComponent(ano)}/${encodeURIComponent(seq)}${suffix}`;
+}
+
+function extractList(data, keys = []) {
+  if (Array.isArray(data)) return data;
+  for (const key of keys) if (Array.isArray(data?.[key])) return data[key];
+  return getArray(data);
+}
+
+function compactDetail(data) {
+  if (!data || typeof data !== "object") return data;
+  return data;
+}
+
+async function fetchJsonOptional(url) {
+  if (!url) return { data: null, error: "Identificador PNCP incompleto." };
+  try {
+    return { data: await fetchJson(url), error: null };
+  } catch (error) {
+    return { data: null, error: error.message };
+  }
+}
+
+app.get("/api/processos/detalhes", async (req, res) => {
+  const controle = String(req.query.id || "").trim();
+  if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
+
+  const processoBase = normalizeProcesso({ numeroControlePNCP: controle });
+  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
+    return res.status(400).json({ error: "Não foi possível identificar CNPJ, ano e sequencial a partir do ID PNCP." });
+  }
+
+  const base = buildCompraApiUrl(processoBase);
+  const urls = {
+    contratacao: base,
+    documentos: buildCompraApiUrl(processoBase, "/arquivos"),
+    itens: buildCompraApiUrl(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
+    historico: buildCompraApiUrl(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
+    fontesOrcamentarias: buildCompraApiUrl(processoBase, "/fonte-orcamentaria"),
+    contratos: `${PNCP_API_BASE}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`,
+    atas: buildCompraApiUrl(processoBase, "/atas")
+  };
+
+  const entries = await Promise.all([
+    fetchJsonOptional(urls.contratacao),
+    fetchJsonOptional(urls.documentos),
+    fetchJsonOptional(urls.itens),
+    fetchJsonOptional(urls.historico),
+    fetchJsonOptional(urls.fontesOrcamentarias),
+    fetchJsonOptional(urls.contratos),
+    fetchJsonOptional(urls.atas)
+  ]);
+
+  const [contratacao, documentos, itens, historico, fontesOrcamentarias, contratos, atas] = entries;
+  const docs = extractList(documentos.data, ["documentos", "arquivos"]);
+  const itemList = extractList(itens.data, ["itens"]);
+  const historyList = extractList(historico.data, ["listaEventos", "eventos", "historico"]);
+  const contractList = extractList(contratos.data, ["contratos", "itens", "content"]);
+  const ataList = extractList(atas.data, ["atas", "content"]);
+
+  const errors = [];
+  for (const [name, result] of Object.entries({ contratacao, documentos, itens, historico, fontesOrcamentarias, contratos, atas })) {
+    if (result.error) errors.push(`${name}: ${result.error}`);
+  }
+
+  res.json({
+    ok: Boolean(contratacao.data),
+    id: controle,
+    identificacao: {
+      cnpj: processoBase.cnpjCompra,
+      ano: processoBase.anoCompra,
+      sequencial: processoBase.sequencialCompra
+    },
+    contratacao: compactDetail(contratacao.data),
+    documentos: docs.map(doc => ({
+      sequencialDocumento: doc?.sequencialDocumento ?? doc?.sequencial_documento ?? null,
+      titulo: doc?.titulo || doc?.nome || "Documento",
+      tipoDocumentoId: doc?.tipoDocumentoId ?? doc?.tipo_documento_id ?? null,
+      tipoDocumentoNome: doc?.tipoDocumentoNome || doc?.tipo_documento_nome || "Documento",
+      dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
+      url: doc?.url || doc?.link || null
+    })),
+    itens: itemList,
+    historico: historyList,
+    fontesOrcamentarias: fontesOrcamentarias.data,
+    contratos: contractList,
+    atas: ataList,
+    endpoints: urls,
+    erros: errors
+  });
+});
+
+app.get("/api/processos/documento", async (req, res) => {
+  const id = String(req.query.id || "").trim();
+  const documento = String(req.query.documento || "").trim();
+  if (!id || !/^\d+$/.test(documento)) return res.status(400).send("Parâmetros inválidos.");
+
+  const processo = normalizeProcesso({ numeroControlePNCP: id });
+  const url = buildCompraApiUrl(processo, `/arquivos/${encodeURIComponent(documento)}`);
+  if (!url) return res.status(400).send("Identificador PNCP inválido.");
+
+  try {
+    const response = await fetch(url, { headers: { Accept: "*/*", Referer: "https://pncp.gov.br/app/editais" } });
+    if (!response.ok) return res.status(response.status).send(`PNCP HTTP ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get("content-type") || "application/octet-stream";
+    const disposition = response.headers.get("content-disposition");
+    res.setHeader("Content-Type", contentType);
+    if (disposition) res.setHeader("Content-Disposition", disposition);
+    else res.setHeader("Content-Disposition", `attachment; filename="documento-pncp-${documento}"`);
+    res.send(buffer);
+  } catch (error) {
+    res.status(502).send(`Falha ao baixar documento do PNCP: ${error.message}`);
+  }
+});
+
 app.get("/api/processos", async (req, res) => {
   const uf = String(req.query.uf || "").trim().toUpperCase();
   const keyword = String(req.query.q || "").trim();
@@ -514,3 +663,4 @@ app.get("/api/pncp-url", (req, res) => {
 app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 app.listen(PORT, () => console.log(`ST Processos ativo na porta ${PORT}`));
+
