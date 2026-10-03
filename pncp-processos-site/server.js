@@ -6,7 +6,7 @@ const PORT = process.env.PORT || 3000;
 
 const PNCP = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
 const CACHE_MS = 5 * 60 * 1000;
-const DIAS_A_FRENTE = 365;
+const DIAS_A_FRENTE = 0;
 const SITUACAO_DIVULGADA_ID = 1;
 const SITUACAO_DIVULGADA_NOME = "Divulgada no PNCP";
 const cache = new Map();
@@ -165,6 +165,7 @@ function normalizeProcesso(item, modalidadeCodigo) {
       item?.objeto ||
       item?.descricao ||
       "Objeto não informado",
+    complemento: item?.informacaoComplementar || item?.informacaoComplementarObjeto || "",
     encerramento:
       item?.dataEncerramentoProposta ||
       item?.dataEncerramento ||
@@ -202,6 +203,7 @@ function matches(processo, keyword) {
 
   const haystack = normalizeText([
     processo.objeto,
+    processo.complemento,
     processo.numero,
     processo.orgao,
     processo.modalidade
@@ -218,7 +220,7 @@ function dateBRYYYYMMDD(daysAhead = 0) {
 
 async function consultaModalidade(codigo, dataFinal, uf, keyword) {
   const resultados = [];
-  const maxPages = 20;
+  const maxPages = 100;
 
   for (let pagina = 1; pagina <= maxPages; pagina++) {
     const params = new URLSearchParams({
@@ -288,16 +290,17 @@ app.get("/api/processos", async (req, res) => {
     });
   }
 
-  // O endpoint /contratacoes/proposta usa dataFinal como limite superior
-  // do período de recebimento de propostas. Portanto, usar "hoje" aqui
-  // exclui editais que continuam abertos, mas encerram nos próximos dias.
-  // Ex.: um edital que encerra em 15/10 não aparece numa consulta com
-  // dataFinal=02/10. Consultamos os próximos 365 dias e depois filtramos
-  // novamente pela data de encerramento.
-  const dataFinal = dateBRYYYYMMDD(DIAS_A_FRENTE);
+  // O endpoint /contratacoes/proposta consulta contratações cujo período
+  // de recebimento está aberto na data informada. Para encontrar o que está
+  // aberto AGORA, a dataFinal precisa ser HOJE.
+  // Não usamos uma data futura: isso pode excluir editais que fecham antes
+  // dessa data futura.
+  const dataFinal = dateBRYYYYMMDD(0);
 
   const processos = [];
   const warnings = [];
+  let chamadasOK = 0;
+  let registrosRecebidos = 0;
 
   /*
     Não disparamos 13 chamadas simultaneamente porque a API do PNCP
@@ -313,6 +316,8 @@ app.get("/api/processos", async (req, res) => {
         keyword
       );
 
+      chamadasOK += 1;
+      registrosRecebidos += encontrados.length;
       processos.push(...encontrados);
     } catch (error) {
       warnings.push(
@@ -348,12 +353,14 @@ app.get("/api/processos", async (req, res) => {
       keyword,
       dataFinal,
       modalidadesConsultadas: Object.keys(MODALIDADES).length,
+      chamadasOK,
+      registrosFiltrados: registrosRecebidos,
       situacao: {
         id: SITUACAO_DIVULGADA_ID,
         nome: SITUACAO_DIVULGADA_NOME
       },
-      periodoAteDias: DIAS_A_FRENTE,
-      criterio: "Somente contratações com situacaoCompraId=1 (Divulgada no PNCP) e data de encerramento igual ou posterior a hoje"
+      periodoAteDias: 0,
+      criterio: "Endpoint de propostas abertas na data de hoje + situacaoCompraId=1 (Divulgada no PNCP) + data de encerramento ainda futura"
     }
   };
 
