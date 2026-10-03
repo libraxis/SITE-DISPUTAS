@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require("path");
 const OpenAI = require("openai");
+const pdfParse = require("pdf-parse");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,6 +21,10 @@ const RETRIES = 3;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-6-luna";
 const OPENAI_BATCH_SIZE = 25;
 const OPENAI_TIMEOUT_MS = 45000;
+const ENRICH_CONCURRENCY = 4;
+const ENRICH_CACHE_MS = 10 * 60 * 1000;
+const ENRICH_PDF_MAX_BYTES = 12 * 1024 * 1024;
+const enrichCache = new Map();
 const OPENAI_ENABLED = Boolean(process.env.OPENAI_API_KEY);
 const openai = OPENAI_ENABLED ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: OPENAI_TIMEOUT_MS, maxRetries: 1 }) : null;
 const SITUACAO_DIVULGADA_ID = 1;
@@ -349,6 +354,194 @@ async function filterWithOpenAI(keyword, processos, diagnostics) {
   return kept;
 }
 
+
+function toIsoDateFromText(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const br = raw.match(/(\d{2})[\/.](\d{2})[\/.](\d{4})(?:\s+às?\s+|\s+)(\d{1,2}):(\d{2})/i);
+  if (br) return `${br[3]}-${br[2]}-${br[1]}T${String(br[4]).padStart(2, "0")}:${br[5]}:00-03:00`;
+  const iso = raw.match(/(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}))?/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}T${iso[4] || "00"}:${iso[5] || "00"}:00-03:00`;
+  return null;
+}
+
+function cleanExtractedText(text) {
+  return String(text || "")
+    .replace(/\u0000/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .slice(0, 120000);
+}
+
+function scoreEditalDocument(doc) {
+  const title = normalizeText(doc?.titulo || doc?.nome || "");
+  let score = 0;
+  if (/edital/.test(title)) score += 100;
+  if (/aviso de contratacao direta/.test(title)) score += 90;
+  if (/aviso/.test(title)) score += 50;
+  if (/contratacao/.test(title)) score += 20;
+  if (/termo de referencia/.test(title)) score += 10;
+  return score;
+}
+
+async function fetchBuffer(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/pdf,application/octet-stream,*/*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+        Referer: "https://pncp.gov.br/app/editais"
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`PNCP HTTP ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > ENRICH_PDF_MAX_BYTES) throw new Error(`PDF excede ${ENRICH_PDF_MAX_BYTES} bytes`);
+    return buffer;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchPncpDetailForEnrichment(processo) {
+  const base = buildCompraApiUrl(processo);
+  if (!base) throw new Error("Identificador PNCP incompleto.");
+  const [contratacaoResult, documentosResult] = await Promise.all([
+    fetchJsonOptional(base),
+    fetchJsonOptional(`${base}/arquivos`)
+  ]);
+  const contratacao = contratacaoResult.data;
+  const docs = extractList(documentosResult.data, ["documentos", "arquivos"]);
+  return { contratacao, docs, errors: [contratacaoResult, documentosResult].filter(x => x.error).map(x => x.error) };
+}
+
+async function chooseAndReadEdital(processo, docs) {
+  const candidates = [...docs]
+    .sort((a, b) => scoreEditalDocument(b) - scoreEditalDocument(a))
+    .slice(0, 4);
+
+  for (const doc of candidates) {
+    const seq = doc?.sequencialDocumento ?? doc?.sequencial_documento;
+    const url = seq != null
+      ? buildCompraApiUrl(processo, `/arquivos/${encodeURIComponent(seq)}`)
+      : (doc?.url || doc?.link || null);
+    if (!url) continue;
+    try {
+      const buffer = await fetchBuffer(url);
+      const parsed = await pdfParse(buffer);
+      const text = cleanExtractedText(parsed.text);
+      if (text.length >= 200) return { doc, text };
+    } catch (_) {
+      // Tenta o próximo documento publicado no PNCP.
+    }
+  }
+  return { doc: null, text: "" };
+}
+
+async function extractDatesWithOpenAI(processo, documentTitle, text) {
+  if (!OPENAI_ENABLED || !text) return null;
+  const response = await openai.responses.create({
+    model: OPENAI_MODEL,
+    store: false,
+    input: [
+      {
+        role: "system",
+        content: "Você extrai dados factuais de editais de contratação pública. Não invente. Retorne datas de início/fim do recebimento de propostas e valor estimado somente quando estiverem explicitamente no texto. Horário é de Brasília."
+      },
+      {
+        role: "user",
+        content: `Processo PNCP: ${processo.controlePncp}\nDocumento: ${documentTitle || "documento oficial"}\n\nTEXTO DO DOCUMENTO:\n${text}`
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "dados_edital",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            inicioRecepcao: { anyOf: [{ type: "string" }, { type: "null" }] },
+            fimRecepcao: { anyOf: [{ type: "string" }, { type: "null" }] },
+            valorEstimado: { anyOf: [{ type: "number" }, { type: "null" }] }
+          },
+          required: ["inicioRecepcao", "fimRecepcao", "valorEstimado"],
+          additionalProperties: false
+        }
+      }
+    }
+  }, { timeout: OPENAI_TIMEOUT_MS, maxRetries: 1 });
+  return safeJsonParse(response.output_text);
+}
+
+async function enrichOneProcesso(processo) {
+  const key = processo.controlePncp || `${processo.cnpjCompra}|${processo.anoCompra}|${processo.sequencialCompra}`;
+  const cached = enrichCache.get(key);
+  if (cached && Date.now() - cached.at < ENRICH_CACHE_MS) return { ...processo, ...cached.data };
+
+  const result = { valor: processo.valor, abertura: processo.abertura, encerramento: processo.encerramento, enriquecimento: { status: "sem_dados", fonte: "PNCP" } };
+  try {
+    const detail = await fetchPncpDetailForEnrichment(processo);
+    const c = detail.contratacao || {};
+    result.valor = pick(c, "valorTotalEstimado", "valor_global", "valorEstimado", "valor_estimado") ?? result.valor;
+    result.abertura = pick(c, "dataAberturaProposta", "dataInicioRecebimentoProposta", "dataInicioRecebimentoPropostas") ?? result.abertura;
+    result.encerramento = pick(c, "dataEncerramentoProposta", "dataFimRecebimentoProposta", "dataFimRecebimentoPropostas") ?? result.encerramento;
+
+    let aiData = null;
+    let edital = null;
+    if (detail.docs.length) {
+      edital = await chooseAndReadEdital(processo, detail.docs);
+      if (edital?.text && OPENAI_ENABLED) {
+        try { aiData = await extractDatesWithOpenAI(processo, edital.doc?.titulo || edital.doc?.nome, edital.text); } catch (_) {}
+      }
+    }
+
+    if (aiData) {
+      result.abertura = toIsoDateFromText(aiData.inicioRecepcao) || result.abertura;
+      result.encerramento = toIsoDateFromText(aiData.fimRecepcao) || result.encerramento;
+      if (aiData.valorEstimado !== null && aiData.valorEstimado !== undefined) result.valor = aiData.valorEstimado;
+    }
+
+    result.enriquecimento = {
+      status: (result.valor != null || result.abertura || result.encerramento) ? "ok" : "sem_dados",
+      fonte: aiData ? "PNCP + edital + IA" : "PNCP + edital",
+      edital: edital?.doc?.titulo || edital?.doc?.nome || null,
+      documentosConsultados: detail.docs.length,
+      erros: detail.errors
+    };
+  } catch (error) {
+    result.enriquecimento = { status: "erro", fonte: "PNCP", erro: error.message };
+  }
+
+  enrichCache.set(key, { at: Date.now(), data: result });
+  return { ...processo, ...result };
+}
+
+async function enrichProcessos(processos, diagnostics) {
+  diagnostics.enriquecimento = { candidatos: processos.length, concluidos: 0, erros: 0, comDados: 0, fonte: OPENAI_ENABLED ? "PNCP + edital + IA" : "PNCP + edital" };
+  const out = new Array(processos.length);
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const index = cursor++;
+      if (index >= processos.length) return;
+      try {
+        out[index] = await enrichOneProcesso(processos[index]);
+        diagnostics.enriquecimento.concluidos++;
+        if (out[index]?.enriquecimento?.status === "ok") diagnostics.enriquecimento.comDados++;
+      } catch (_) {
+        out[index] = processos[index];
+        diagnostics.enriquecimento.erros++;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(ENRICH_CONCURRENCY, processos.length) }, worker));
+  return out;
+}
+
 function portalUrl(uf, keyword) {
   const p = new URLSearchParams({ q: keyword, status: "recebendo_proposta", pagina: "1" });
   if (uf) p.set("ufs", uf);
@@ -625,6 +818,10 @@ app.get("/api/processos", async (req, res) => {
   processos = await filterWithOpenAI(keyword, processos, diagnostics);
   diagnostics.candidatosAntesIA = beforeAi;
   diagnostics.candidatosDepoisIA = processos.length;
+
+  // Depois do filtro, consulta a contratação no PNCP, os documentos publicados e o edital.
+  // O edital é usado como fonte complementar para datas/valor quando a ficha do PNCP não traz esses campos.
+  processos = await enrichProcessos(processos, diagnostics);
 
   const unique = new Map();
   for (const processo of processos) {
