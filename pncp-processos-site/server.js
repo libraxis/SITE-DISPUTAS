@@ -3,6 +3,29 @@ const path = require("path");
 const pdfParse = require("pdf-parse");
 const AdmZip = require("adm-zip");
 
+// Alguns editais em PDF possuem fontes TTF/estruturas internas incompletas.
+// O PDF.js usado pelo pdf-parse consegue recuperar esses arquivos, mas emite
+// avisos muito verbosos no console (TT: undefined function, invalid function id,
+// Indexing all PDF objects, glyf table etc.). Eles não indicam falha da leitura.
+// Filtramos somente esses avisos específicos para manter os logs do Render limpos,
+// sem esconder erros reais da aplicação.
+const PDF_PARSER_LOG_RE = /(?:TT:\s*(?:undefined function|invalid function id)|Indexing all PDF objects|Required ['"]glyf['"] table is not found)/i;
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleWarn = console.warn.bind(console);
+const originalConsoleError = console.error.bind(console);
+function shouldSuppressPdfParserLog(args) {
+  return args.some((arg) => PDF_PARSER_LOG_RE.test(String(arg)));
+}
+console.log = (...args) => {
+  if (!shouldSuppressPdfParserLog(args)) originalConsoleLog(...args);
+};
+console.warn = (...args) => {
+  if (!shouldSuppressPdfParserLog(args)) originalConsoleWarn(...args);
+};
+console.error = (...args) => {
+  if (!shouldSuppressPdfParserLog(args)) originalConsoleError(...args);
+};
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
