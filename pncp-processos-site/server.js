@@ -181,8 +181,22 @@ function normalizeProcesso(item, modalidadeFallback = null) {
     situacaoCompraNome: pick(item, "situacaoCompraNome", "situacao_nome", "situacaoNome", "situacao") || "",
     objeto: pick(item, "description", "objetoCompra", "objeto", "descricao", "titulo", "title") || "Objeto não informado",
     complemento: pick(item, "informacaoComplementar", "informacao_complementar", "complemento") || "",
-    abertura: pick(item, "dataAberturaProposta", "data_inicio_recebimento_propostas", "dataInicioRecebimentoPropostas", "data_abertura_proposta") || null,
-    encerramento: pick(item, "dataEncerramentoProposta", "data_fim_recebimento_propostas", "dataFimRecebimentoPropostas", "data_encerramento_proposta", "data_encerramento") || null,
+    // O endpoint /api/search pode retornar nomes diferentes conforme a origem/plataforma.
+    // Mantemos vários aliases para que o início e o fim do recebimento apareçam na tabela.
+    abertura: pick(
+      item,
+      "dataAberturaProposta", "data_abertura_proposta",
+      "dataInicioRecebimentoProposta", "dataInicioRecebimentoPropostas",
+      "data_inicio_recebimento_proposta", "data_inicio_recebimento_propostas",
+      "dataAbertura", "data_inicio_recebimento", "dataInicioRecebimento"
+    ) || item?.contratacao?.dataAberturaProposta || item?.contratacao?.dataInicioRecebimentoProposta || null,
+    encerramento: pick(
+      item,
+      "dataEncerramentoProposta", "data_encerramento_proposta", "data_encerramento",
+      "dataFimRecebimentoProposta", "dataFimRecebimentoPropostas",
+      "data_fim_recebimento_proposta", "data_fim_recebimento_propostas",
+      "dataEncerramento", "data_fim_recebimento", "dataFimRecebimento"
+    ) || item?.contratacao?.dataEncerramentoProposta || item?.contratacao?.dataFimRecebimentoProposta || null,
     publicacao: pick(item, "data_publicacao_pncp", "dataPublicacaoPNCP", "dataDivulgacaoPncp", "data_publicacao") || null,
     valor: pick(item, "valor_global", "valorTotalEstimado", "valor_estimado", "valorEstimado") ?? null,
     fonte: pick(item, "fonte_plataforma", "fontePlataforma", "usuario_nome") || "",
