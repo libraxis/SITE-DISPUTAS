@@ -332,3 +332,45 @@ $("#refreshBtn").addEventListener("click", () => { if ($("#keyword").value.trim(
 $("#closeDetails").addEventListener("click", closeDetails);
 $("#detailsModal").addEventListener("click", event => { if (event.target === $("#detailsModal")) closeDetails(); });
 document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("#detailsModal").classList.contains("hidden")) closeDetails(); });
+
+
+// Barra horizontal fixa sincronizada com a tabela de resultados
+(function setupHorizontalScrollProxy() {
+  const init = () => {
+    const wrap = document.querySelector("#results .table-wrap");
+    const proxy = document.getElementById("horizontalScrollProxy");
+    const inner = document.getElementById("horizontalScrollProxyInner");
+    const table = document.getElementById("processTable");
+    if (!wrap || !proxy || !inner || !table) return;
+    let syncing = false;
+    const update = () => {
+      const needed = wrap.scrollWidth > wrap.clientWidth + 1 &&
+        !document.getElementById("results").classList.contains("hidden");
+      proxy.classList.toggle("active", needed);
+      document.body.classList.toggle("has-scroll-proxy", needed);
+      inner.style.width = `${wrap.scrollWidth}px`;
+      if (needed && !syncing) {
+        syncing = true; proxy.scrollLeft = wrap.scrollLeft; syncing = false;
+      }
+    };
+    wrap.addEventListener("scroll", () => {
+      if (syncing) return;
+      syncing = true; proxy.scrollLeft = wrap.scrollLeft; syncing = false;
+    }, { passive: true });
+    proxy.addEventListener("scroll", () => {
+      if (syncing) return;
+      syncing = true; wrap.scrollLeft = proxy.scrollLeft; syncing = false;
+    }, { passive: true });
+    new ResizeObserver(update).observe(wrap);
+    new MutationObserver(update).observe(document.getElementById("results"), {
+      attributes: true, attributeFilter: ["class"]
+    });
+    update();
+    // A tabela pode ser renderizada/atualizada depois da pesquisa.
+    const tbody = table.querySelector("tbody");
+    if (tbody) new MutationObserver(update).observe(tbody, { childList: true, subtree: true });
+    window.addEventListener("resize", update);
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();

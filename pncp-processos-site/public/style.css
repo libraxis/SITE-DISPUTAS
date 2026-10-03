@@ -156,3 +156,29 @@ input:focus,select:focus,textarea:focus{border-color:#6b8ee8;box-shadow:0 0 0 3p
   .document-row { align-items: flex-start; flex-wrap: wrap; }
   .document-actions { width: 100%; padding-left: 50px; }
 }
+
+
+/* Correções de layout da tabela de resultados */
+#results { min-width: 0; }
+.table-wrap { width: 100%; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+#processTable { table-layout: fixed; width: 1450px; min-width: 1450px; }
+#processTable th, #processTable td { white-space: normal; overflow-wrap: anywhere; word-break: normal; }
+#processTable .result-id { width: 190px; }
+#processTable .result-org { width: 220px; }
+#processTable .result-mode { width: 190px; }
+#processTable .result-object { width: 360px; min-width: 0; max-width: none; white-space: normal; overflow-wrap: anywhere; }
+#processTable .result-value { width: 145px; white-space: normal; }
+#processTable .result-dates { width: 205px; }
+#processTable .result-status { width: 190px; }
+#processTable .result-actions { width: 135px; white-space: normal; }
+#processTable .status-pill { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+#processTable td { line-height: 1.4; }
+#horizontalScrollProxy {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 900;
+  height: 18px; overflow-x: auto; overflow-y: hidden;
+  background: rgba(245,247,251,.96); border-top: 1px solid #d7dde7;
+  display: none;
+}
+#horizontalScrollProxy.active { display: block; }
+#horizontalScrollProxyInner { height: 1px; }
+body.has-scroll-proxy { padding-bottom: 18px; }
