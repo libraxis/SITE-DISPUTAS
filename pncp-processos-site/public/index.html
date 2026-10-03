@@ -159,17 +159,18 @@
             <thead>
               <tr>
                 <th>Processo / Edital</th>
-                <th>Órgão</th>
-                <th>UF</th>
-                <th>Modalidade</th>
+                <th>Órgão / Local</th>
+                <th>Modalidade / Disputa</th>
                 <th>Objeto</th>
-                <th>Encerramento</th>
-                <th></th>
+                <th>Valor</th>
+                <th>Recebimento de propostas</th>
+                <th>Situação / Plataforma</th>
+                <th>Ações</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td colspan="7" class="empty">
+                <td colspan="8" class="empty">
                   Informe os filtros e pesquise.
                 </td>
               </tr>
@@ -179,6 +180,21 @@
       </div>
     </section>
   </main>
+
+
+  <div id="detailsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="detailsTitle">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <div>
+          <div class="eyebrow">DETALHES COMPLETOS</div>
+          <h2 id="detailsTitle">Contratação PNCP</h2>
+          <p id="detailsSubtitle" class="muted"></p>
+        </div>
+        <button id="closeDetails" class="close-modal" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div id="detailsContent" class="modal-content"></div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>
