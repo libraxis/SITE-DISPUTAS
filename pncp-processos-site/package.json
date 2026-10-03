@@ -1,6 +1,6 @@
 {
   "name": "pncp-processos-abertos",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": true,
   "description": "Busca de processos do PNCP com recebimento de propostas aberto",
   "main": "server.js",
@@ -12,6 +12,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "openai": "^6.16.0"
   }
 }
