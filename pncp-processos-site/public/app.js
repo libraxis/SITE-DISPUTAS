@@ -158,7 +158,25 @@ async function enrichVisibleResults() {
   await Promise.all(Array.from({ length: workers }, worker));
 }
 
+function setupDiagnosticsToggle(){
+  const toggle = $("#diagnosticsToggle");
+  const content = $("#diagnosticsContent");
+  if(!toggle || !content || toggle.dataset.bound === "1") return;
+  toggle.dataset.bound = "1";
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") === "true";
+    const next = !expanded;
+    toggle.setAttribute("aria-expanded", String(next));
+    content.hidden = !next;
+    const hint = toggle.querySelector(".diagnostics-toggle-hint");
+    if(hint) hint.textContent = next ? "Clique para ocultar os dados da consulta" : "Clique para exibir os dados da consulta";
+    const card = $("#diagnostics");
+    if(card) card.classList.toggle("diagnostics-collapsed", !next);
+  });
+}
+
 function renderDiagnostics(data) {
+  setupDiagnosticsToggle();
   const box = $("#diagnostics");
   if (!box) return;
   const c = data?.consulta || {};

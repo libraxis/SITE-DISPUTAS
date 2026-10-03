@@ -100,15 +100,21 @@
 
       <div id="notice" class="notice hidden"></div>
 
-      <div id="diagnostics" class="card hidden">
-        <div class="card-head">
-          <div>
-            <div class="eyebrow">DIAGNÓSTICO DA CONSULTA</div>
-            <h3>O que o PNCP respondeu</h3>
+      <div id="diagnostics" class="card hidden diagnostics-collapsed">
+        <button id="diagnosticsToggle" class="diagnostics-toggle" type="button" aria-expanded="false" aria-controls="diagnosticsContent">
+          <span class="diagnostics-toggle-icon" aria-hidden="true">▸</span>
+          <span>Diagnóstico da consulta</span>
+          <span class="diagnostics-toggle-hint">Clique para exibir os dados da consulta</span>
+        </button>
+        <div id="diagnosticsContent" class="diagnostics-content" hidden>
+          <div class="card-head">
+            <div>
+              <div class="eyebrow">DIAGNÓSTICO DA CONSULTA</div>
+              <h3>O que o PNCP respondeu</h3>
+            </div>
+            <a id="officialSearch" class="ghost" href="#" target="_blank" rel="noopener">Abrir pesquisa oficial do PNCP</a>
           </div>
-          <a id="officialSearch" class="ghost" href="#" target="_blank" rel="noopener">Abrir pesquisa oficial do PNCP</a>
-        </div>
-        <div class="diag-grid">
+          <div class="diag-grid">
           <div><span>Resposta do PNCP</span><strong id="diagResponse">—</strong></div>
           <div><span>Registros recebidos</span><strong id="diagRaw">—</strong></div>
           <div><span>Divulgada no PNCP</span><strong id="diagDivulgada">—</strong></div>
@@ -119,11 +125,12 @@
           <div><span>Removidos pela IA</span><strong id="diagAiRemoved">—</strong></div>
           <div><span>Filtro Gemini</span><strong id="diagAiStatus">—</strong></div>
           <div><span>Tempo da consulta</span><strong id="diagTime">—</strong></div>
+          </div>
+          <details>
+            <summary>Detalhes técnicos</summary>
+            <pre id="diagDetails"></pre>
+          </details>
         </div>
-        <details>
-          <summary>Detalhes técnicos</summary>
-          <pre id="diagDetails"></pre>
-        </details>
       </div>
 
       <div id="stats" class="stats hidden">
