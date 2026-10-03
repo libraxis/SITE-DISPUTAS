@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ST Processos • PNCP</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">ST</div>
+      <div>
+        <strong>ST Processos</strong>
+        <small>oportunidades PNCP</small>
+      </div>
+    </div>
+
+    <nav>
+      <button class="nav active" data-view="buscar">BUSCAR PROCESSOS</button>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <div class="auth-badge online">PNCP ONLINE</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">ST PROCESSOS • PNCP</div>
+        <h1>Buscar processos</h1>
+      </div>
+      <div class="top-actions">
+        <button class="ghost" id="refreshBtn">Atualizar</button>
+        <small id="refreshStatus" class="refresh-status hidden">Atualizando...</small>
+      </div>
+    </header>
+
+    <section id="buscarView" class="view">
+      <div class="card supplier-hero">
+        <div class="card-head">
+          <div>
+            <div class="eyebrow">BUSCAR PROCESSOS</div>
+            <h3>Processos com propostas abertas</h3>
+          </div>
+        </div>
+
+        <p class="muted">
+          Encontre editais e avisos do PNCP que ainda estão recebendo propostas.
+          Escolha a UF e informe o material ou serviço que está sendo licitado.
+        </p>
+
+        <form id="searchForm" class="supplier-search">
+          <div>
+            <label>UF</label>
+            <select id="uf">
+              <option value="">Todas as UFs</option>
+              <option>AC</option><option>AL</option><option>AP</option>
+              <option>AM</option><option>BA</option><option>CE</option>
+              <option>DF</option><option>ES</option><option>GO</option>
+              <option>MA</option><option>MT</option><option>MS</option>
+              <option>MG</option><option>PA</option><option>PB</option>
+              <option>PR</option><option>PE</option><option>PI</option>
+              <option>RJ</option><option>RN</option><option>RS</option>
+              <option>RO</option><option>RR</option><option>SC</option>
+              <option>SP</option><option>SE</option><option>TO</option>
+            </select>
+          </div>
+
+          <div class="grow">
+            <label>Material / serviço</label>
+            <input
+              id="keyword"
+              minlength="2"
+              placeholder="Ex.: material elétrico, computador, limpeza, papel A4"
+            >
+          </div>
+
+          <button id="searchBtn" class="primary" type="submit">
+            Pesquisar processos
+          </button>
+        </form>
+
+        <div class="supplier-source">
+          Fonte oficial: <b>Portal Nacional de Contratações Públicas (PNCP)</b>.
+          A consulta considera somente contratações com recebimento de propostas
+          aberto; o termo informado é aplicado sobre o objeto da contratação.
+        </div>
+      </div>
+
+      <div id="loading" class="card hidden">
+        <div class="notice">Consultando processos abertos no PNCP...</div>
+        <div id="progress" class="muted" style="margin-top:10px">
+          Preparando pesquisa.
+        </div>
+      </div>
+
+      <div id="notice" class="notice hidden"></div>
+
+      <div id="stats" class="stats hidden">
+        <div class="stat">
+          <span>Processos encontrados</span>
+          <strong id="statTotal">—</strong>
+        </div>
+        <div class="stat">
+          <span>UF pesquisada</span>
+          <strong id="statUf">Todas</strong>
+        </div>
+        <div class="stat">
+          <span>Com proposta aberta</span>
+          <strong id="statAbertos">—</strong>
+        </div>
+      </div>
+
+      <div id="results" class="card hidden">
+        <div class="card-head">
+          <div>
+            <h3>Processos localizados</h3>
+            <span id="resultHint" class="muted"></span>
+          </div>
+          <input
+            id="resultFilter"
+            class="compact-input"
+            placeholder="Filtrar resultados"
+          >
+        </div>
+
+        <div class="table-wrap">
+          <table id="processTable">
+            <thead>
+              <tr>
+                <th>Processo / Edital</th>
+                <th>Órgão</th>
+                <th>UF</th>
+                <th>Modalidade</th>
+                <th>Objeto</th>
+                <th>Encerramento</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colspan="7" class="empty">
+                  Informe os filtros e pesquise.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
