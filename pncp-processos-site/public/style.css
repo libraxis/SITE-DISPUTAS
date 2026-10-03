@@ -246,3 +246,15 @@ body.has-scroll-proxy { padding-bottom: 18px; }
   line-height: 1.35;
   opacity: .72;
 }
+
+
+/* V8: sem coluna de valor nos resultados; somente datas de recepção. */
+#processTable { width: 1570px; min-width: 1570px; table-layout: fixed; }
+#processTable .col-process { width: 190px; }
+#processTable .col-org { width: 215px; }
+#processTable .col-mode { width: 185px; }
+#processTable .col-object { width: 425px; }
+#processTable .col-dates { width: 220px; }
+#processTable .col-status { width: 205px; }
+#processTable .col-actions { width: 130px; }
+#processTable .result-dates { width: auto; min-width: 0; }

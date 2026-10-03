@@ -83,10 +83,6 @@ function render() {
           <small>${process.srp === null || process.srp === undefined ? "" : `SRP: ${yesNo(process.srp)}`}</small>
         </td>
         <td class="result-object">${esc(process.objeto || "—")}</td>
-        <td class="result-value">
-          <strong class="js-value">${esc(fmtMoney(process.valor))}</strong>
-          <small class="js-enrich-status">${process.enriquecimento?.status === "ok" ? "Extraído do edital" : "Consultando edital..."}</small>
-        </td>
         <td class="result-dates">
           <small><b>Início da recepção:</b> <span class="js-abertura">${esc(fmtDate(process.abertura))}</span></small>
           <small><b>Fim da recepção:</b> <span class="js-encerramento">${esc(fmtDate(process.encerramento))}</span></small>
@@ -101,7 +97,7 @@ function render() {
         </td>
       </tr>
     `).join("")
-    : `<tr><td colspan="8" class="empty">Nenhum processo corresponde aos filtros informados.</td></tr>`;
+    : `<tr><td colspan="7" class="empty">Nenhum processo corresponde aos filtros informados.</td></tr>`;
 
   $("#processTable tbody").querySelectorAll(".details-btn").forEach(button => {
     button.addEventListener("click", () => openDetails(Number(button.dataset.index), rows));
@@ -174,7 +170,7 @@ function renderDiagnostics(data) {
   $("#diagAiBefore").textContent = Number(c.candidatosAntesIA ?? c.ai?.candidatosAntes ?? 0).toLocaleString("pt-BR");
   $("#diagAiAfter").textContent = Number(c.candidatosDepoisIA ?? c.ai?.mantidos ?? 0).toLocaleString("pt-BR");
   $("#diagAiRemoved").textContent = Number(c.ai?.removidos ?? 0).toLocaleString("pt-BR");
-  $("#diagAiStatus").textContent = c.ai?.status === "ok" ? `ATIVO (${c.ai.model || "OpenAI"})` : (c.ai?.status || "—");
+  $("#diagAiStatus").textContent = c.ai?.status === "ok" ? `ATIVO (${c.ai.model || "Gemini"})` : (c.ai?.status || "—");
   $("#diagTime").textContent = `${Math.round((c.tempoMs || c.durationMs || 0) / 1000)}s`;
   $("#officialSearch").href = data?.portalUrl || "https://pncp.gov.br/app/editais";
   $("#diagDetails").textContent = JSON.stringify(c, null, 2);
@@ -348,7 +344,7 @@ async function search(event) {
   $("#stats").classList.add("hidden");
   $("#diagnostics").classList.add("hidden");
   $("#notice").classList.add("hidden");
-  $("#progress").textContent = "Consultando a base oficial do PNCP e localizando os editais. Os dados de valor e recepção serão extraídos dos documentos em segundo plano...";
+  $("#progress").textContent = "Consultando a base oficial do PNCP e localizando os editais. As datas de início e fim da recepção serão extraídas dos documentos em segundo plano...";
 
   try {
     const data = await api(`/api/processos?uf=${encodeURIComponent(uf)}&q=${encodeURIComponent(keyword)}`);
