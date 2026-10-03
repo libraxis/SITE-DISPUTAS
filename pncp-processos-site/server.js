@@ -359,129 +359,13 @@ async function filterWithOpenAI(keyword, processos, diagnostics) {
 function toIsoDateFromText(value) {
   if (!value) return null;
   const raw = String(value).trim();
-  const br = raw.match(/(\d{2})[\/.](\d{2})[\/.](\d{4})(?:\s+às?\s+|\s+)(\d{1,2}):(\d{2})/i);
-  if (br) return `${br[3]}-${br[2]}-${br[1]}T${String(br[4]).padStart(2, "0")}:${br[5]}:00-03:00`;
-  const iso = raw.match(/(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}))?/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}T${iso[4] || "00"}:${iso[5] || "00"}:00-03:00`;
+  const br = raw.match(/(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})(?:[^\d]{0,20}(\d{1,2})(?::|h|h\s*)?(\d{2}))?/i);
+  if (br) {
+    return `${br[3]}-${String(br[2]).padStart(2, "0")}-${String(br[1]).padStart(2, "0")}T${String(br[4] || "00").padStart(2, "0")}:${String(br[5] || "00").padStart(2, "0")}:00-03:00`;
+  }
+  const iso = raw.match(/(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2}):?(\d{2}))?/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}T${String(iso[4] || "00").padStart(2, "0")}:${String(iso[5] || "00").padStart(2, "0")}:00-03:00`;
   return null;
-}
-
-function cleanExtractedText(text) {
-  return String(text || "")
-    .replace(/\u0000/g, " ")
-    .replace(/\r/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .slice(0, 120000);
-}
-
-function scoreEditalDocument(doc) {
-  const title = normalizeText(doc?.titulo || doc?.nome || "");
-  let score = 0;
-  if (/edital/.test(title)) score += 100;
-  if (/aviso de contratacao direta/.test(title)) score += 90;
-  if (/aviso/.test(title)) score += 50;
-  if (/contratacao/.test(title)) score += 20;
-  if (/termo de referencia/.test(title)) score += 10;
-  return score;
-}
-
-async function fetchBuffer(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      headers: {
-        Accept: "application/pdf,application/octet-stream,*/*",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
-        Referer: "https://pncp.gov.br/app/editais"
-      },
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`PNCP HTTP ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > ENRICH_PDF_MAX_BYTES) throw new Error(`PDF excede ${ENRICH_PDF_MAX_BYTES} bytes`);
-    return buffer;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function fetchPncpDocumentsForEnrichment(processo) {
-  // A listagem de documentos é obtida diretamente pela API oficial do PNCP.
-  // Não navegamos pelo portal nem dependemos do botão "Acessar contratação".
-  const base = buildCompraApiUrl(processo);
-  if (!base) throw new Error("Identificador PNCP incompleto.");
-  const documentosResult = await fetchJsonOptional(`${base}/arquivos`);
-  const docs = extractList(documentosResult.data, ["documentos", "arquivos"]);
-  return { docs, errors: documentosResult.error ? [documentosResult.error] : [] };
-}
-
-async function chooseAndReadEdital(processo, docs) {
-  if (!Array.isArray(docs) || !docs.length) return null;
-
-  const normalized = docs
-    .map((doc, index) => ({ doc, index, score: scoreEditalDocument(doc) }))
-    .sort((a, b) => b.score - a.score);
-
-  // Primeiro tenta documentos explicitamente identificados como Edital/Aviso.
-  // Se não houver, tenta os primeiros documentos para lidar com órgãos que
-  // publicam o instrumento convocatório com um título genérico.
-  const candidates = normalized.filter(x => x.score > 0).slice(0, 3);
-  if (!candidates.length) candidates.push(...normalized.slice(0, Math.min(3, normalized.length)));
-
-  let lastError = null;
-  for (const candidate of candidates) {
-    const doc = candidate.doc;
-    const seq = doc?.sequencialDocumento ?? doc?.sequencial_documento;
-    if (seq == null) continue;
-
-    try {
-      const base = buildCompraApiUrl(processo);
-      const url = `${base}/arquivos/${encodeURIComponent(seq)}`;
-      const buffer = await fetchBuffer(url);
-      const contentType = String(doc?.contentType || doc?.tipoMime || doc?.mimeType || "").toLowerCase();
-      const title = String(doc?.titulo || doc?.nome || "").toLowerCase();
-      const isPdf = contentType.includes("pdf") || title.endsWith(".pdf") || buffer.subarray(0, 4).toString() === "%PDF";
-      if (!isPdf) continue;
-
-      const parsed = await pdfParse(buffer);
-      const text = cleanExtractedText(parsed?.text || "");
-      if (text.length > 80) return { doc, text, url, score: candidate.score };
-
-      // PDF escaneado: guarda o arquivo para uma tentativa de análise por PDF
-      // diretamente pela IA, quando a chave estiver configurada.
-      if (OPENAI_ENABLED) return { doc, text, buffer, url, score: candidate.score, scanned: true };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (lastError) throw lastError;
-  return null;
-}
-
-function extractRelevantSnippets(text, maxChars = 18000) {
-  const source = String(text || "");
-  const lines = source.split(/\n+/).map(x => x.trim()).filter(Boolean);
-  const keywords = /recebimento|recepção|recepcao|propostas?|proposta|valor\s+(estimado|total)|estimado|orçamento|orcamento|abertura|encerramento|sess[aã]o\s+p[úu]blica/i;
-  const picked = [];
-  const seen = new Set();
-  for (let i = 0; i < lines.length; i++) {
-    if (!keywords.test(lines[i])) continue;
-    const from = Math.max(0, i - 2);
-    const to = Math.min(lines.length, i + 3);
-    for (let j = from; j < to; j++) {
-      const line = lines[j];
-      if (!line || seen.has(line)) continue;
-      seen.add(line);
-      picked.push(line);
-    }
-  }
-  let result = picked.join("\n");
-  if (!result) result = source.slice(0, maxChars);
-  if (result.length > maxChars) result = result.slice(0, maxChars);
-  return result;
 }
 
 function parseMoneyText(value) {
@@ -493,24 +377,97 @@ function parseMoneyText(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function normalizePdfForExtraction(text) {
+  return String(text || "")
+    .replace(/\u0000/g, " ")
+    .replace(/[\u00a0\u2007\u202f]/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractDateCandidates(text) {
+  const source = normalizePdfForExtraction(text);
+  const datePattern = /(\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})(?:\s*(?:às?|as|,)?\s*(\d{1,2})(?::|h)\s*(\d{2}))?/gi;
+  const out = [];
+  let match;
+  while ((match = datePattern.exec(source))) {
+    const raw = `${match[1]}${match[2] ? ` ${match[2]}:${match[3]}` : ""}`;
+    const iso = toIsoDateFromText(raw);
+    if (iso) out.push({ raw, iso, index: match.index });
+  }
+  return out;
+}
+
 function extractLikelyStructuredData(text) {
-  const source = String(text || "");
+  const source = normalizePdfForExtraction(text);
   const result = { inicioRecepcao: null, fimRecepcao: null, valorEstimado: null };
+  const dates = extractDateCandidates(source);
 
-  const date = `(\\d{1,2}\\s*[\\/.-]\\s*\\d{1,2}\\s*[\\/.-]\\s*\\d{4})(?:[^\\d]{0,30}(\\d{1,2}:\\d{2}))?`;
-  const startRe = new RegExp(`(?:in[ií]cio|abertura|a partir de)[^\\n]{0,100}(?:recep[cç][aã]o|recebimento|propostas?)[^\\n]{0,120}${date}`, "i");
-  const endRe = new RegExp(`(?:fim|encerramento|at[eé])[^\\n]{0,100}(?:recep[cç][aã]o|recebimento|propostas?)[^\\n]{0,120}${date}`, "i");
-  const genericStartRe = new RegExp(`(?:recep[cç][aã]o|recebimento)\\s+(?:de\\s+)?propostas?[^\\n]{0,160}${date}`, "i");
-  const genericEndRe = new RegExp(`(?:fim|encerramento|até|ate)[^\n]{0,100}(?:recep[cç][aã]o|recebimento|propostas?)[^\n]{0,120}${date}`, "i");
+  // Os editais usam várias redações. Em vez de exigir uma ordem fixa das palavras,
+  // procuramos cada data dentro do contexto imediatamente ao redor dela.
+  const contexts = dates.map(d => ({
+    ...d,
+    context: source.slice(Math.max(0, d.index - 280), Math.min(source.length, d.index + 280))
+  }));
 
-  const s = source.match(startRe) || source.match(genericStartRe);
-  const e = source.match(endRe);
-  if (s) result.inicioRecepcao = `${s[1]}${s[2] ? ` ${s[2]}` : ""}`;
-  if (e) result.fimRecepcao = `${e[1]}${e[2] ? ` ${e[2]}` : ""}`;
+  const startTerms = /(in[ií]cio|in[ií]cio do|a partir de|abertura do per[ií]odo|dispon[ií]vel a partir|in[ií]cio do prazo|come[cç]o)/i;
+  const receiveTerms = /(recebimento|recep[cç][aã]o|envio|apresenta[cç][aã]o|submiss[aã]o|encaminhamento)\s+(?:(?:d[aeo]s?|dos)\s+)?(?:propostas?|lances?)/i;
+  const endTerms = /(fim|final|encerramento|t[eé]rmino|at[eé]|prazo final|limite|fechamento)/i;
 
-  const money = /(?:valor\s+(?:total\s+)?estimado|valor\s+estimado|or[cç]amento\s+estimado|valor\s+m[aá]ximo)[^R$0-9]{0,80}R?\$?\s*([0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:,[0-9]{2}))/i;
-  const m = source.match(money);
-  if (m) result.valorEstimado = parseMoneyText(m[1]);
+  const startCandidates = contexts.filter(x => receiveTerms.test(x.context) && startTerms.test(x.context));
+  const endCandidates = contexts.filter(x => receiveTerms.test(x.context) && endTerms.test(x.context));
+
+  const keywordDistance = (context, keywordRe, preferBefore = true) => {
+    const matches = [...String(context).matchAll(keywordRe)];
+    if (!matches.length) return 99999;
+    // A data normalmente vem logo depois do rótulo ("início...: DATA" / "fim...: DATA").
+    // Damos preferência ao rótulo mais próximo da data e, em empate, ao que aparece antes.
+    const pos = String(context).length / 2;
+    return Math.min(...matches.map(m => Math.abs(m.index - pos) + (preferBefore && m.index > pos ? 80 : 0)));
+  };
+
+  if (startCandidates.length) {
+    startCandidates.sort((a, b) => {
+      const sa = keywordDistance(a.context, /(in[ií]cio|a partir de)/ig);
+      const sb = keywordDistance(b.context, /(in[ií]cio|a partir de)/ig);
+      return sa - sb || a.index - b.index;
+    });
+    result.inicioRecepcao = startCandidates[0].raw;
+  }
+
+  if (endCandidates.length) {
+    endCandidates.sort((a, b) => {
+      const sa = keywordDistance(a.context, /(fim|encerramento|t[eé]rmino|prazo final|limite|fechamento)/ig);
+      const sb = keywordDistance(b.context, /(fim|encerramento|t[eé]rmino|prazo final|limite|fechamento)/ig);
+      return sa - sb || b.index - a.index;
+    });
+    result.fimRecepcao = endCandidates[0].raw;
+  }
+
+  // Caso clássico: "recebimento das propostas de 02/10/2026 às 09:00 até 16/10/2026 às 09:00".
+  const rangeRe = /(?:recebimento|recep[cç][aã]o|envio|apresenta[cç][aã]o)[^.]{0,180}?((?:\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})(?:\s*(?:às?|as|,)\s*\d{1,2}(?::|h)\s*\d{2})?)[^.]{0,80}?(?:at[eé]|a)\s+((?:\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})(?:\s*(?:às?|as|,)\s*\d{1,2}(?::|h)\s*\d{2})?)/i;
+  const range = source.match(rangeRe);
+  if (range) {
+    result.inicioRecepcao = result.inicioRecepcao || range[1];
+    result.fimRecepcao = result.fimRecepcao || range[2];
+  }
+
+  // Outra redação comum: "das 08:00 do dia 02/10/2026 até às 09:00 do dia 16/10/2026".
+  const range2 = source.match(/(?:propostas?|recebimento|recep[cç][aã]o)[^.]{0,180}?((?:\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})(?:\s*(?:às?|as|,)\s*\d{1,2}(?::|h)\s*\d{2})?)[^.]{0,100}?(?:at[eé]|a partir|encerrando|at[eé] o dia)[^.]{0,100}?((?:\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})(?:\s*(?:às?|as|,)\s*\d{1,2}(?::|h)\s*\d{2})?)/i);
+  if (range2) {
+    result.inicioRecepcao = result.inicioRecepcao || range2[1];
+    result.fimRecepcao = result.fimRecepcao || range2[2];
+  }
+
+  // Valor estimado: aceita variações como valor total estimado, valor global,
+  // orçamento estimado, valor máximo aceitável e total da contratação.
+  const moneyRe = /(?:valor\s+(?:(?:total|global|m[aá]ximo|estimado|estimada)\s*){1,3}|or[cç]amento\s+(?:estimado|estimada)|estimativa\s+de\s+(?:valor|pre[cç]o)|valor\s+m[aá]ximo\s+aceit[aá]vel|total\s+estimado)[^R$0-9]{0,120}(?:R\$\s*)?([0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]{2})?|[0-9]+(?:,[0-9]{2})?)/i;
+  const money = source.match(moneyRe);
+  if (money) result.valorEstimado = parseMoneyText(money[1]);
+
   return result;
 }
 
@@ -645,7 +602,7 @@ async function enrichOneProcesso(processo) {
         }
 
         // A IA só é chamada para completar o que não foi identificado localmente.
-        if (OPENAI_ENABLED && !edital.buffer && (!localData.inicioRecepcao || !localData.fimRecepcao || localData.valorEstimado == null)) {
+        if (OPENAI_ENABLED && edital.text && (!localData.inicioRecepcao || !localData.fimRecepcao || localData.valorEstimado == null)) {
           try {
             const ai = await extractDatesWithOpenAI(processo, edital.doc?.titulo || edital.doc?.nome, edital.text);
             if (ai) {
@@ -670,7 +627,7 @@ async function enrichOneProcesso(processo) {
 
     result.enriquecimento = {
       status: (result.valor != null || result.abertura || result.encerramento) ? "ok" : "sem_dados",
-      fonte: aiData && OPENAI_ENABLED ? "edital + IA" : "edital",
+      fonte: aiData ? (OPENAI_ENABLED ? "edital + IA (quando disponível)" : "edital (extração local)") : "PNCP",
       edital: edital?.doc?.titulo || edital?.doc?.nome || null,
       documentosConsultados: detail.docs.length,
       erros: detail.errors
