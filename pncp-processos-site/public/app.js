@@ -88,8 +88,8 @@ function render() {
           <small>Estimado/Avaliado</small>
         </td>
         <td class="result-dates">
-          <small><b>Início:</b> ${esc(fmtDate(process.abertura))}</small>
-          <small><b>Fim:</b> ${esc(fmtDate(process.encerramento))}</small>
+          <small><b>Início da recepção:</b> ${esc(fmtDate(process.abertura))}</small>
+          <small><b>Fim da recepção:</b> ${esc(fmtDate(process.encerramento))}</small>
         </td>
         <td class="result-status">
           <span class="status-pill">${esc(process.situacaoCompraNome || "Divulgada no PNCP")}</span>
