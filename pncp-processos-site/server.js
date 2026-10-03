@@ -22,7 +22,9 @@ const GEMINI_BATCH_SIZE = 50;
 const GEMINI_TIMEOUT_MS = 45000;
 const ENRICH_CONCURRENCY = 8;
 const ENRICH_CACHE_MS = 10 * 60 * 1000;
-const ENRICH_PDF_MAX_BYTES = 12 * 1024 * 1024;
+const ENRICH_PDF_MAX_BYTES = 10 * 1024 * 1024;
+const ENRICH_DOCUMENT_LIMIT = 6;
+const GEMINI_DOCUMENT_BATCH_CHARS = 42000;
 const enrichCache = new Map();
 const GEMINI_ENABLED = Boolean(process.env.GEMINI_API_KEY);
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -365,9 +367,19 @@ async function filterWithGemini(keyword, processos, diagnostics) {
 function toIsoDateFromText(value) {
   if (!value) return null;
   const raw = String(value).trim();
-  const br = raw.match(/(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})(?:[^\d]{0,20}(\d{1,2})(?::|h|h\s*)?(\d{2}))?/i);
+  const monthMap = {
+    janeiro: 1, fevereiro: 2, marco: 3, março: 3, abril: 4, maio: 5, junho: 6,
+    julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12
+  };
+  const normalizeMonth = (name) => monthMap[String(name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')] || null;
+  const br = raw.match(/(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})(?:[^\d]{0,24}(\d{1,2})(?::|h|h\s*)?(\d{2}))?/i);
   if (br) {
     return `${br[3]}-${String(br[2]).padStart(2, "0")}-${String(br[1]).padStart(2, "0")}T${String(br[4] || "00").padStart(2, "0")}:${String(br[5] || "00").padStart(2, "0")}:00-03:00`;
+  }
+  const words = raw.match(/(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})(?:[^\d]{0,24}(\d{1,2})(?::|h|h\s*)?(\d{2}))?/i);
+  if (words) {
+    const month = normalizeMonth(words[2]);
+    if (month) return `${words[3]}-${String(month).padStart(2, "0")}-${String(words[1]).padStart(2, "0")}T${String(words[4] || "00").padStart(2, "0")}:${String(words[5] || "00").padStart(2, "0")}:00-03:00`;
   }
   const iso = raw.match(/(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2}):?(\d{2}))?/);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}T${String(iso[4] || "00").padStart(2, "0")}:${String(iso[5] || "00").padStart(2, "0")}:00-03:00`;
@@ -397,6 +409,10 @@ function normalizePdfForExtraction(text) {
 function extractDateCandidates(text) {
   const source = normalizePdfForExtraction(text);
   const datePattern = /(\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})(?:\s*(?:às?|as|,)?\s*(\d{1,2})(?::|h)\s*(\d{2}))?/gi;
+  const wordDatePattern = /(\d{1,2}\s+de\s+[A-Za-zÀ-ÿ]+\s+de\s+\d{4})(?:\s*(?:às?|as|,)?\s*(\d{1,2})(?::|h)\s*(\d{2}))?/gi;
+  // Muitos editais escrevem “07h00min do dia 08 de outubro de 2026”.
+  // Também capturamos “07:00 do dia 08/10/2026”, pois o horário vem antes da data.
+  const timeBeforeDatePattern = /(\d{1,2})(?::|h)\s*(\d{2})\s*(?:min(?:utos?)?\s*)?(?:do\s+dia|dia)\s+(\d{1,2}\s*(?:de\s+[A-Za-zÀ-ÿ]+\s+de\s+\d{4}|[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4}))/gi;
   const out = [];
   let match;
   while ((match = datePattern.exec(source))) {
@@ -404,7 +420,17 @@ function extractDateCandidates(text) {
     const iso = toIsoDateFromText(raw);
     if (iso) out.push({ raw, iso, index: match.index });
   }
-  return out;
+  while ((match = wordDatePattern.exec(source))) {
+    const raw = `${match[1]}${match[2] ? ` ${match[2]}:${match[3]}` : ""}`;
+    const iso = toIsoDateFromText(raw);
+    if (iso) out.push({ raw, iso, index: match.index });
+  }
+  while ((match = timeBeforeDatePattern.exec(source))) {
+    const raw = `${match[3]} ${match[1]}:${match[2]}`;
+    const iso = toIsoDateFromText(raw);
+    if (iso) out.push({ raw, iso, index: match.index });
+  }
+  return out.sort((a, b) => a.index - b.index);
 }
 
 function extractLikelyStructuredData(text) {
@@ -420,11 +446,17 @@ function extractLikelyStructuredData(text) {
   }));
 
   const startTerms = /(in[ií]cio|in[ií]cio do|a partir de|abertura do per[ií]odo|dispon[ií]vel a partir|in[ií]cio do prazo|come[cç]o)/i;
-  const receiveTerms = /(recebimento|recep[cç][aã]o|envio|apresenta[cç][aã]o|submiss[aã]o|encaminhamento)\s+(?:(?:d[aeo]s?|dos)\s+)?(?:propostas?|lances?)/i;
+  const receiveTerms = /(recebimento|recep[cç][aã]o|recepta[cç][aã]o|cadastramento|cadastro|registro|envio|apresenta[cç][aã]o|submiss[aã]o|encaminhamento|acolhimento|entrega)\s+(?:(?:d[aeo]s?|dos)\s+)?(?:propostas?|lances?)/i;
   const endTerms = /(fim|final|encerramento|t[eé]rmino|at[eé]|prazo final|limite|fechamento)/i;
 
-  const startCandidates = contexts.filter(x => receiveTerms.test(x.context) && startTerms.test(x.context));
-  const endCandidates = contexts.filter(x => receiveTerms.test(x.context) && endTerms.test(x.context));
+  // Rótulos usados pelos editais para o prazo de propostas.
+  // Ex.: “RECEBIMENTO DAS PROPOSTAS: 07h00min do dia 08 de outubro de 2026”.
+  // Nesses casos o rótulo, por si só, já identifica a data inicial; não é
+  // obrigatório existir a palavra “início”.
+  const proposalLabel = /(recebimento|recep[cç][aã]o|recepta[cç][aã]o|cadastramento|cadastro|registro|envio|apresenta[cç][aã]o|submiss[aã]o|encaminhamento|acolhimento|entrega)\s+(?:(?:d[aeo]s?|dos)\s+)?(?:de\s+)?propostas?/i;
+
+  const startCandidates = contexts.filter(x => proposalLabel.test(x.context) && (startTerms.test(x.context) || /(?:propostas?\s*[:\-]\s*|propostas?\s+ser[aã]o|propostas?\s+at[eé]|propostas?\s+de\s+)/i.test(x.context)));
+  const endCandidates = contexts.filter(x => proposalLabel.test(x.context) && endTerms.test(x.context));
 
   const keywordDistance = (context, keywordRe, preferBefore = true) => {
     const matches = [...String(context).matchAll(keywordRe)];
@@ -451,6 +483,15 @@ function extractLikelyStructuredData(text) {
       return sa - sb || b.index - a.index;
     });
     result.fimRecepcao = endCandidates[0].raw;
+  }
+
+  // Quando o edital usa apenas “RECEBIMENTO/CADASTRAMENTO DAS PROPOSTAS: DATA”,
+  // a primeira data diretamente associada ao rótulo é o início do período.
+  if (!result.inicioRecepcao) {
+    const directStart = contexts
+      .filter(x => proposalLabel.test(x.context))
+      .sort((a, b) => a.index - b.index);
+    if (directStart.length) result.inicioRecepcao = directStart[0].raw;
   }
 
   // Caso clássico: "recebimento das propostas de 02/10/2026 às 09:00 até 16/10/2026 às 09:00".
@@ -481,7 +522,7 @@ function extractRelevantSnippets(text) {
   const source = normalizePdfForExtraction(text);
   if (!source) return "";
   const maxChars = 120000;
-  const terms = /(recebimento|recep[cç][aã]o|envio|apresenta[cç][aã]o|submiss[aã]o|propostas?|prazo para propostas?)/gi;
+  const terms = /(recebimento|recep[cç][aã]o|recepta[cç][aã]o|cadastramento|cadastro|registro|envio|apresenta[cç][aã]o|submiss[aã]o|acolhimento|entrega|propostas?|prazo para propostas?)/gi;
   const snippets = [];
   let match;
   while ((match = terms.exec(source)) && snippets.length < 30) {
@@ -502,7 +543,7 @@ async function extractDatesWithGemini(processo, documentTitle, text) {
   return await callGemini({
     contents: [{
       role: "user",
-      parts: [{ text: `Você extrai dados factuais de um edital ou aviso oficial de contratação pública. Use SOMENTE o conteúdo fornecido. Identifique EXCLUSIVAMENTE o início e o fim do recebimento/recepção/envio de propostas. Não extraia valor. Não confunda data de publicação, sessão pública, abertura da sessão, disputa, abertura de envelopes ou prazo de execução com o recebimento de propostas. Se houver mais de uma data, escolha a que estiver explicitamente associada ao recebimento/envio de propostas. Preserve a data e horário encontrados. Horário é de Brasília. Se não houver informação explícita, retorne null.\n\nProcesso PNCP: ${processo.controlePncp}\nDocumento: ${documentTitle || "edital/aviso"}\n\nTRECHOS RELEVANTES:\n${snippets}` }]
+      parts: [{ text: `Você extrai dados factuais de um edital ou aviso oficial de contratação pública. Use SOMENTE o conteúdo fornecido. Identifique EXCLUSIVAMENTE o início e o fim do recebimento/recepção/receptação/cadastramento/cadastro/registro/envio/apresentação/submissão de propostas. Não extraia valor. Não confunda data de publicação, sessão pública, abertura da sessão, disputa, abertura de envelopes ou prazo de execução com o recebimento de propostas. Se houver mais de uma data, escolha a que estiver explicitamente associada ao recebimento/envio de propostas. Preserve a data e horário encontrados. Horário é de Brasília. Se não houver informação explícita, retorne null.\n\nProcesso PNCP: ${processo.controlePncp}\nDocumento: ${documentTitle || "edital/aviso"}\n\nTRECHOS RELEVANTES:\n${snippets}` }]
     }],
     schema: {
       type: "object",
@@ -522,7 +563,7 @@ async function extractDatesFromPdfWithGemini(processo, edital) {
     contents: [{
       role: "user",
       parts: [
-        { text: `Leia este edital/aviso oficial do processo ${processo.controlePncp}. Extraia EXCLUSIVAMENTE as datas e horários de INÍCIO e FIM do recebimento/recepção/envio de propostas. Não extraia valor. Não confunda com data de publicação, sessão pública, abertura da sessão, disputa, abertura de envelopes ou prazo de execução. Se não houver informação explícita, retorne null. Preserve o texto da data/hora encontrada. Horário de Brasília.` },
+        { text: `Leia este edital/aviso oficial do processo ${processo.controlePncp}. Extraia EXCLUSIVAMENTE as datas e horários de INÍCIO e FIM do recebimento/recepção/receptação/cadastramento/cadastro/registro/envio/apresentação/submissão de propostas. Não extraia valor. Não confunda com data de publicação, sessão pública, abertura da sessão, disputa, abertura de envelopes ou prazo de execução. Se não houver informação explícita, retorne null. Preserve o texto da data/hora encontrada. Horário de Brasília.` },
         { inlineData: { mimeType: "application/pdf", data: pdfBase64 } }
       ]
     }],
@@ -611,21 +652,22 @@ async function downloadPncpDocument(processo, doc) {
 async function chooseAndReadEdital(processo, docs) {
   if (!Array.isArray(docs) || !docs.length) return null;
 
-  // Não basta pegar o primeiro PDF chamado "Edital": alguns processos publicam
-  // o aviso, edital, anexos e termos em arquivos separados. Lemos vários
-  // candidatos e escolhemos aquele que realmente contém as datas de propostas.
+  // A etapa anterior baixava/lia os PDFs um por um. Isso fazia cada processo
+  // esperar vários downloads consecutivos. Agora os documentos mais prováveis
+  // são baixados e extraídos em paralelo e o Gemini só entra depois, se ainda
+  // faltar alguma data.
   const ranked = docs.slice()
     .sort((a, b) => scoreEditalDocument(b) - scoreEditalDocument(a));
+  const selected = ranked.slice(0, ENRICH_DOCUMENT_LIMIT);
   const errors = [];
-  const candidates = [];
 
-  for (const doc of ranked.slice(0, 8)) {
+  const candidates = (await Promise.all(selected.map(async (doc) => {
     try {
       const downloaded = await downloadPncpDocument(processo, doc);
-      if (!downloaded?.buffer) continue;
+      if (!downloaded?.buffer) return null;
       if (downloaded.buffer.length > ENRICH_PDF_MAX_BYTES) {
         errors.push(`${doc.titulo || doc.nome}: arquivo maior que o limite de análise`);
-        continue;
+        return null;
       }
 
       let text = "";
@@ -639,31 +681,73 @@ async function chooseAndReadEdital(processo, docs) {
       const local = text ? extractLikelyStructuredData(text) : { inicioRecepcao: null, fimRecepcao: null };
       const dateHits = Number(Boolean(local.inicioRecepcao)) + Number(Boolean(local.fimRecepcao));
       const titleScore = scoreEditalDocument(doc);
-      candidates.push({
+      return {
         doc,
         buffer: downloaded.buffer,
         text,
         url: downloaded.url,
         local,
         dateHits,
-        score: titleScore + dateHits * 500,
-        errors: []
-      });
+        score: titleScore + dateHits * 500
+      };
     } catch (error) {
       errors.push(`${doc.titulo || doc.nome}: ${error.message}`);
+      return null;
     }
-  }
+  }))).filter(Boolean);
 
   if (!candidates.length) {
     return { doc: ranked[0], buffer: null, text: "", url: ranked[0]?.url || null, errors, candidates: [] };
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  const best = candidates[0];
-  best.errors = errors;
-  // Mantemos os demais candidatos disponíveis para a segunda etapa: se o
-  // primeiro não tiver as duas datas, o Gemini poderá analisar outro documento.
-  return { ...best, errors, candidates };
+  return { ...candidates[0], errors, candidates };
+}
+
+async function extractDatesFromCandidatesWithGemini(processo, candidates) {
+  if (!GEMINI_ENABLED || !Array.isArray(candidates) || !candidates.length) return null;
+
+  // Uma única chamada para vários documentos é muito mais rápida que uma
+  // chamada Gemini por PDF. Enviamos apenas os trechos em que aparecem termos
+  // relacionados a propostas, mantendo o contexto do documento.
+  const parts = [];
+  let remaining = GEMINI_DOCUMENT_BATCH_CHARS;
+  for (const candidate of candidates.filter(c => c.text).slice(0, 5)) {
+    if (remaining <= 0) break;
+    const snippet = extractRelevantSnippets(candidate.text).slice(0, Math.min(14000, remaining));
+    if (!snippet) continue;
+    parts.push(`DOCUMENTO: ${candidate.doc?.titulo || candidate.doc?.nome || "edital/aviso"}\n${snippet}`);
+    remaining -= snippet.length;
+  }
+  if (!parts.length) return null;
+
+  return await callGemini({
+    contents: [{ role: "user", parts: [{ text: `Você extrai dados factuais de documentos oficiais de uma contratação pública.
+
+Processo PNCP: ${processo.controlePncp}
+
+Analise TODOS os documentos abaixo e retorne EXCLUSIVAMENTE o início e o fim do recebimento/recepção/receptação/cadastramento/cadastro/registro/envio/apresentação/submissão de propostas.
+- Se um documento tiver o início e outro tiver o fim, combine as duas informações.
+- Não confunda recebimento de propostas com abertura da sessão, disputa, lances, publicação, homologação ou prazo de execução.
+- Considere equivalentes, quando o contexto indicar o prazo de propostas: “recebimento das propostas”, “recepção das propostas”, “receptação das propostas”, “cadastramento de propostas”, “cadastro de propostas”, “registro de propostas”, “envio de propostas”, “apresentação de propostas”, “submissão de propostas”, “acolhimento de propostas” e “entrega de propostas”.
+- Se houver várias datas, escolha somente a que estiver explicitamente ligada ao recebimento/cadastramento/envio/apresentação/submissão de propostas.
+- Considere também horários escritos antes da data, como “07h00min do dia 08 de outubro de 2026” ou “07:00 do dia 08/10/2026”.
+- Considere também horários escritos antes da data, como “07h00min do dia 08 de outubro de 2026” ou “07:00 do dia 08/10/2026”.
+- Preserve data e horário encontrados.
+- Horário de Brasília.
+- Se uma das datas não estiver explícita, retorne null para ela.
+
+${parts.join("\n\n===== PRÓXIMO DOCUMENTO =====\n\n")}` }] }],
+    schema: {
+      type: "object",
+      properties: {
+        inicioRecepcao: { type: ["string", "null"] },
+        fimRecepcao: { type: ["string", "null"] }
+      },
+      required: ["inicioRecepcao", "fimRecepcao"]
+    },
+    timeoutMs: 30000
+  });
 }
 
 async function enrichOneProcesso(processo) {
@@ -716,9 +800,8 @@ async function enrichOneProcesso(processo) {
         ? edital.candidates
         : (edital ? [edital] : []);
 
-      // 1) Primeiro usamos a extração local em TODOS os documentos candidatos.
-      // Isso resolve editais em que as datas estão no aviso, no edital ou em um
-      // documento complementar diferente do primeiro PDF listado pelo PNCP.
+      // 1) Extração local em paralelo já ocorreu no download dos documentos.
+      // Aproveitamos imediatamente qualquer data encontrada sem chamar IA.
       for (const candidate of candidates) {
         const localData = candidate.local || (candidate.text ? extractLikelyStructuredData(candidate.text) : null);
         if (!localData) continue;
@@ -731,61 +814,48 @@ async function enrichOneProcesso(processo) {
         if (aiData?.inicioRecepcao && aiData?.fimRecepcao) break;
       }
 
-      // 2) Gemini analisa os documentos com texto. Se o primeiro não tiver as
-      // duas datas, passa para os próximos candidatos em vez de desistir.
+      // 2) Se faltar alguma data, uma única chamada Gemini analisa os trechos
+      // relevantes de vários documentos ao mesmo tempo.
       if (GEMINI_ENABLED && !(aiData?.inicioRecepcao && aiData?.fimRecepcao)) {
-        for (const candidate of candidates) {
-          if (!candidate.text) continue;
-          try {
-            const ai = await extractDatesWithGemini(
-              processo,
-              candidate.doc?.titulo || candidate.doc?.nome,
-              candidate.text
-            );
-            if (ai) {
-              aiData = {
-                inicioRecepcao: aiData?.inicioRecepcao || ai.inicioRecepcao,
-                fimRecepcao: aiData?.fimRecepcao || ai.fimRecepcao
-              };
-            }
-            if (aiData?.inicioRecepcao && aiData?.fimRecepcao) {
-              edital = { ...edital, ...candidate };
-              break;
-            }
-          } catch (error) {
-            result.enriquecimento = {
-              status: "parcial",
-              fonte: "PNCP + edital + Gemini",
-              erroIA: error.message
+        try {
+          const ai = await extractDatesFromCandidatesWithGemini(processo, candidates);
+          if (ai) {
+            aiData = {
+              inicioRecepcao: aiData?.inicioRecepcao || ai.inicioRecepcao,
+              fimRecepcao: aiData?.fimRecepcao || ai.fimRecepcao
             };
           }
+          if (aiData?.inicioRecepcao && aiData?.fimRecepcao) {
+            const matched = candidates.find(c => c.text && extractRelevantSnippets(c.text).includes(String(aiData.inicioRecepcao).slice(0, 10)));
+            if (matched) edital = { ...edital, ...matched };
+          }
+        } catch (error) {
+          result.enriquecimento = {
+            status: "parcial",
+            fonte: "PNCP + edital + Gemini",
+            erroIA: error.message
+          };
         }
       }
 
-      // 3) Para PDF escaneado/imagem, o Gemini recebe o PDF original. Também
-      // tentamos mais de um documento, pois o edital pode ser apenas um dos
-      // anexos publicados.
-      if (GEMINI_ENABLED && !(aiData?.inicioRecepcao && aiData?.fimRecepcao)) {
-        for (const candidate of candidates.filter(c => c.buffer)) {
+      // 3) PDFs escaneados não possuem camada de texto. Só nesse caso usamos
+      // o PDF original no Gemini, e em paralelo para no máximo 2 candidatos.
+      const noTextCandidates = candidates.filter(c => c.buffer && !c.text).slice(0, 2);
+      if (GEMINI_ENABLED && !(aiData?.inicioRecepcao && aiData?.fimRecepcao) && noTextCandidates.length) {
+        const ocrResults = await Promise.all(noTextCandidates.map(async candidate => {
           try {
-            const ai = await extractDatesFromPdfWithGemini(processo, candidate);
-            if (ai) {
-              aiData = {
-                inicioRecepcao: aiData?.inicioRecepcao || ai.inicioRecepcao,
-                fimRecepcao: aiData?.fimRecepcao || ai.fimRecepcao
-              };
-            }
-            if (aiData?.inicioRecepcao && aiData?.fimRecepcao) {
-              edital = { ...edital, ...candidate };
-              break;
-            }
+            return await extractDatesFromPdfWithGemini(processo, candidate);
           } catch (error) {
-            result.enriquecimento = {
-              status: "parcial",
-              fonte: "PNCP + PDF + Gemini",
-              erroIA: error.message
-            };
+            return { error: error.message };
           }
+        }));
+        for (const ai of ocrResults) {
+          if (!ai || ai.error) continue;
+          aiData = {
+            inicioRecepcao: aiData?.inicioRecepcao || ai.inicioRecepcao,
+            fimRecepcao: aiData?.fimRecepcao || ai.fimRecepcao
+          };
+          if (aiData?.inicioRecepcao && aiData?.fimRecepcao) break;
         }
       }
     }
