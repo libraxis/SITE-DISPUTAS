@@ -493,26 +493,76 @@ async function filterWithGemini(keyword, processos, diagnostics) {
   return kept;
 }
 
+function isValidDateParts(year, month, day, hour = 0, minute = 0) {
+  const y = Number(year), m = Number(month), d = Number(day), h = Number(hour), min = Number(minute);
+  if (!Number.isInteger(y) || y < 1900 || y > 2200) return false;
+  if (!Number.isInteger(m) || m < 1 || m > 12) return false;
+  if (!Number.isInteger(d) || d < 1 || d > 31) return false;
+  if (!Number.isInteger(h) || h < 0 || h > 23) return false;
+  if (!Number.isInteger(min) || min < 0 || min > 59) return false;
+  const check = new Date(Date.UTC(y, m - 1, d));
+  return check.getUTCFullYear() === y && check.getUTCMonth() === m - 1 && check.getUTCDate() === d;
+}
+
+function buildBrIso(year, month, day, hour = 0, minute = 0) {
+  if (!isValidDateParts(year, month, day, hour, minute)) return null;
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00-03:00`;
+}
+
 function toIsoDateFromText(value) {
   if (!value) return null;
-  const raw = String(value).trim();
+  const raw = String(value).trim().replace(/\s+/g, " ");
   const monthMap = {
     janeiro: 1, fevereiro: 2, marco: 3, março: 3, abril: 4, maio: 5, junho: 6,
     julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12
   };
-  const normalizeMonth = (name) => monthMap[String(name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')] || null;
-  const br = raw.match(/(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})(?:[^\d]{0,24}(\d{1,2})(?::|h|h\s*)?(\d{2}))?/i);
-  if (br) {
-    return `${br[3]}-${String(br[2]).padStart(2, "0")}-${String(br[1]).padStart(2, "0")}T${String(br[4] || "00").padStart(2, "0")}:${String(br[5] || "00").padStart(2, "0")}:00-03:00`;
+  const normalizeMonth = name => monthMap[String(name || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")] || null;
+  const finish = (year, month, day, hour = 0, minute = 0, second = 0) => {
+    if (!Number.isInteger(Number(second)) || Number(second) < 0 || Number(second) > 59) return null;
+    return buildBrIso(year, month, day, hour, minute);
+  };
+
+  // ISO enviado pelo próprio PNCP ou retornado pelo Gemini.
+  let m = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2}):([0-9]{2})(?::([0-9]{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/);
+  if (m) return finish(m[1], m[2], m[3], m[4] ?? 0, m[5] ?? 0, m[6] ?? 0);
+
+  // Formato brasileiro: 19/11/2026, 19/11/2026 às 08:00, 19/11/2026 às 08h00min,
+  // e também com segundos. Horas/minutos/segundos fora do intervalo são rejeitados.
+  m = raw.match(/^(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})(?:\s*(?:às?|as|,)\s*)?(\d{1,2})(?::|h)(\d{2})(?:\s*min(?:utos?)?)?(?::\s*(\d{2}))?$/i);
+  if (m) return finish(m[3], m[2], m[1], m[4], m[5], m[6] ?? 0);
+  m = raw.match(/^(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})$/i);
+  if (m) return finish(m[3], m[2], m[1]);
+
+  // Formato por extenso: 19 de novembro de 2026 às 08:00.
+  m = raw.match(/^(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})(?:\s*(?:às?|as|,)\s*)?(\d{1,2})(?::|h)(\d{2})(?:\s*min(?:utos?)?)?(?::\s*(\d{2}))?$/i);
+  if (m) {
+    const month = normalizeMonth(m[2]);
+    return month ? finish(m[3], month, m[1], m[4], m[5], m[6] ?? 0) : null;
   }
-  const words = raw.match(/(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})(?:[^\d]{0,24}(\d{1,2})(?::|h|h\s*)?(\d{2}))?/i);
-  if (words) {
-    const month = normalizeMonth(words[2]);
-    if (month) return `${words[3]}-${String(month).padStart(2, "0")}-${String(words[1]).padStart(2, "0")}T${String(words[4] || "00").padStart(2, "0")}:${String(words[5] || "00").padStart(2, "0")}:00-03:00`;
+  m = raw.match(/^(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})$/i);
+  if (m) {
+    const month = normalizeMonth(m[2]);
+    return month ? finish(m[3], month, m[1]) : null;
   }
-  const iso = raw.match(/(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2}):?(\d{2}))?/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}T${String(iso[4] || "00").padStart(2, "0")}:${String(iso[5] || "00").padStart(2, "0")}:00-03:00`;
+
+  // Redações comuns: “07h00min do dia 08 de outubro de 2026” e
+  // “07:00 do dia 08/10/2026”.
+  m = raw.match(/^(\d{1,2})(?::|h)\s*(\d{2})(?:\s*min(?:utos?)?)?(?::\s*(\d{2}))?\s*do\s+dia\s+(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})$/i);
+  if (m) {
+    const month = normalizeMonth(m[5]);
+    return month ? finish(m[6], month, m[4], m[1], m[2], m[3] ?? 0) : null;
+  }
+  m = raw.match(/^(\d{1,2})(?::|h)\s*(\d{2})(?:\s*min(?:utos?)?)?(?::\s*(\d{2}))?\s*do\s+dia\s+(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})$/i);
+  if (m) return finish(m[6], m[5], m[4], m[1], m[2], m[3] ?? 0);
+
   return null;
+}
+
+function isValidIsoDate(value) {
+  if (!value) return false;
+  const raw = String(value).trim();
+  const normalized = toIsoDateFromText(raw);
+  return Boolean(normalized);
 }
 
 function parseMoneyText(value) {
@@ -990,9 +1040,20 @@ async function enrichOneProcesso(processo) {
     }
 
     if (aiData) {
-      result.abertura = toIsoDateFromText(aiData.inicioRecepcao) || result.abertura;
-      result.encerramento = toIsoDateFromText(aiData.fimRecepcao) || result.encerramento;
+      // As datas gravadas diretamente na contratação pelo PNCP são a fonte
+      // prioritária: o próprio manual do PNCP define dataAberturaProposta e
+      // dataEncerramentoProposta como início e fim do recebimento. O edital/IA
+      // só completa uma data ausente e nunca substitui uma data válida do PNCP.
+      const aiInicio = toIsoDateFromText(aiData.inicioRecepcao);
+      const aiFim = toIsoDateFromText(aiData.fimRecepcao);
+      if (!result.abertura && aiInicio) result.abertura = aiInicio;
+      if (!result.encerramento && aiFim) result.encerramento = aiFim;
     }
+
+    // Blindagem final: jamais enviar para o navegador uma data/hora impossível
+    // (por exemplo 00:00:99). Se uma fonte retornar algo inválido, descartamos.
+    if (result.abertura && !isValidIsoDate(result.abertura)) result.abertura = null;
+    if (result.encerramento && !isValidIsoDate(result.encerramento)) result.encerramento = null;
 
     result.enriquecimento = {
       status: (result.abertura || result.encerramento) ? "ok" : "sem_dados",
