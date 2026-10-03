@@ -9,12 +9,17 @@ const AdmZip = require("adm-zip");
 // Indexing all PDF objects, glyf table etc.). Eles não indicam falha da leitura.
 // Filtramos somente esses avisos específicos para manter os logs do Render limpos,
 // sem esconder erros reais da aplicação.
-const PDF_PARSER_LOG_RE = /(?:TT:\s*(?:undefined function|invalid function id)|Indexing all PDF objects|Required ['"]glyf['"] table is not found)/i;
+const PDF_PARSER_LOG_RE = /(?:TT:\s*(?:undefined function|invalid function id)|Indexing all PDF objects|Required ['"]glyf['"] table is not found|Ran out of space in font private use area)/i;
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleWarn = console.warn.bind(console);
 const originalConsoleError = console.error.bind(console);
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
+const originalStdoutWrite = process.stdout.write.bind(process.stdout);
 function shouldSuppressPdfParserLog(args) {
   return args.some((arg) => PDF_PARSER_LOG_RE.test(String(arg)));
+}
+function shouldSuppressPdfParserText(text) {
+  return PDF_PARSER_LOG_RE.test(String(text || ""));
 }
 console.log = (...args) => {
   if (!shouldSuppressPdfParserLog(args)) originalConsoleLog(...args);
@@ -24,6 +29,22 @@ console.warn = (...args) => {
 };
 console.error = (...args) => {
   if (!shouldSuppressPdfParserLog(args)) originalConsoleError(...args);
+};
+// Algumas bibliotecas de fontes/PDF escrevem estes avisos diretamente em stderr,
+// sem passar por console.warn. Filtramos somente as mensagens conhecidas do parser.
+process.stderr.write = function(chunk, encoding, callback) {
+  if (shouldSuppressPdfParserText(chunk)) {
+    if (typeof callback === "function") callback();
+    return true;
+  }
+  return originalStderrWrite(chunk, encoding, callback);
+};
+process.stdout.write = function(chunk, encoding, callback) {
+  if (shouldSuppressPdfParserText(chunk)) {
+    if (typeof callback === "function") callback();
+    return true;
+  }
+  return originalStdoutWrite(chunk, encoding, callback);
 };
 
 const app = express();
