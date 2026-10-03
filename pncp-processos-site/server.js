@@ -4,14 +4,17 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const PNCP =
-  "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
-
+const PNCP = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
 const CACHE_MS = 5 * 60 * 1000;
-const MAX_PAGES = 30;
-const PAGE_SIZE = 50;
+const DIAS_A_FRENTE = 365;
+const SITUACAO_DIVULGADA_ID = 1;
+const SITUACAO_DIVULGADA_NOME = "Divulgada no PNCP";
 const cache = new Map();
 
+/*
+  Modalidades documentadas pelo PNCP.
+  A consulta /contratacoes/proposta exige codigoModalidadeContratacao.
+*/
 const MODALIDADES = {
   1: "Leilão - Eletrônico",
   2: "Diálogo Competitivo",
@@ -20,7 +23,7 @@ const MODALIDADES = {
   5: "Concorrência - Presencial",
   6: "Pregão - Eletrônico",
   7: "Pregão - Presencial",
-  8: "Dispensa",
+  8: "Dispensa de Licitação",
   9: "Inexigibilidade",
   10: "Manifestação de Interesse",
   11: "Pré-qualificação",
@@ -41,61 +44,55 @@ function normalizeText(value) {
 
 function pick(obj, ...keys) {
   for (const key of keys) {
-    if (obj && obj[key] !== undefined && obj[key] !== null) return obj[key];
+    if (obj && obj[key] !== undefined && obj[key] !== null) {
+      return obj[key];
+    }
   }
   return null;
 }
 
-function dateBRYYYYMMDD(daysAhead = 365) {
-  const d = new Date();
-  d.setDate(d.getDate() + daysAhead);
-  return [
-    d.getFullYear(),
-    String(d.getMonth() + 1).padStart(2, "0"),
-    String(d.getDate()).padStart(2, "0")
-  ].join("");
-}
-
-async function fetchJson(url, timeout = 30000) {
+async function fetchJson(url, timeout = 25000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
 
   try {
     const response = await fetch(url, {
-      method: "GET",
       headers: {
-        accept: "application/json, */*",
-        "user-agent": "ST-Processos-PNCP/2.0"
+        accept: "application/json",
+        "user-agent": "ST-Processos-PNCP/1.1"
       },
       signal: controller.signal
     });
 
-    if (response.status === 204) {
-      return { data: [], content: [] };
-    }
-
     const body = await response.text();
 
     if (!response.ok) {
-      throw new Error(`PNCP HTTP ${response.status}: ${body.slice(0, 500)}`);
+      throw new Error(`PNCP HTTP ${response.status}: ${body.slice(0, 300)}`);
     }
 
     try {
       return JSON.parse(body);
     } catch {
-      throw new Error("Resposta do PNCP não é JSON.");
+      throw new Error("O PNCP retornou uma resposta que não é JSON válido.");
     }
   } finally {
     clearTimeout(timer);
   }
 }
 
-function contentOf(data) {
+function getContent(data) {
   if (Array.isArray(data)) return data;
-  return data?.data || data?.content || data?.items || data?.resultados || [];
+
+  return (
+    data?.data ||
+    data?.content ||
+    data?.resultados ||
+    data?.items ||
+    []
+  );
 }
 
-function totalPagesOf(data) {
+function getTotalPages(data) {
   return Number(
     data?.totalPaginas ??
     data?.totalPages ??
@@ -105,64 +102,69 @@ function totalPagesOf(data) {
   ) || 1;
 }
 
-function normalizeProcesso(item, modalidadeCodigo = null) {
-  const org = item?.orgaoEntidade || {};
-  const unidade = item?.unidadeOrgao || {};
+function normalizeProcesso(item, modalidadeCodigo) {
+  const org = item?.orgaoEntidade || item?.orgao || item?.entidade || {};
+  const unidade = item?.unidadeOrgao || item?.unidadeAdministrativa || {};
 
-  const uf = String(
+  const uf =
     pick(unidade, "ufSigla") ||
     pick(org, "ufSigla") ||
     item?.uf ||
-    ""
-  ).toUpperCase();
+    "";
 
   const cnpj =
-    pick(org, "cnpj") ||
+    pick(org, "cnpj", "cnpjOrgao") ||
     item?.cnpjOrgao ||
     item?.cnpj ||
     "";
 
   const ano = item?.anoCompra || item?.ano || "";
   const seq = item?.sequencialCompra || item?.sequencial || "";
-  const controle = item?.numeroControlePNCP || "";
 
-  const modalidadeCodigoReal =
-    item?.modalidadeId ||
-    item?.codigoModalidadeContratacao ||
-    modalidadeCodigo;
+  const controle =
+    item?.numeroControlePNCP ||
+    item?.numeroControlePncp ||
+    "";
 
   const modalidade =
     item?.modalidadeNome ||
-    MODALIDADES[modalidadeCodigoReal] ||
+    item?.modalidade ||
+    MODALIDADES[modalidadeCodigo] ||
     "Não informada";
+
+  const situacaoCompraId = Number(
+    item?.situacaoCompraId ?? item?.situacaoId ?? 0
+  ) || 0;
+
+  const situacaoCompraNome =
+    item?.situacaoCompraNome ||
+    item?.situacaoNome ||
+    "";
 
   return {
     controlePncp: controle,
     numero:
       item?.numeroCompra ||
       item?.numeroEdital ||
-      item?.processo ||
       item?.numeroProcesso ||
       controle ||
       "Processo PNCP",
     orgao:
       org?.razaoSocial ||
-      org?.razaosocial ||
+      org?.razaoSocialOrgao ||
       org?.nome ||
       item?.razaoSocial ||
       "Órgão não informado",
-    uf,
+    uf: String(uf || "").toUpperCase(),
     modalidade,
-    modalidadeCodigo: modalidadeCodigoReal,
+    modalidadeCodigo,
+    situacaoCompraId,
+    situacaoCompraNome,
     objeto:
       item?.objetoCompra ||
       item?.objeto ||
       item?.descricao ||
-      "",
-    complemento:
-      item?.informacaoComplementar ||
-      item?.informacaoComplementarObjeto ||
-      "",
+      "Objeto não informado",
     encerramento:
       item?.dataEncerramentoProposta ||
       item?.dataEncerramento ||
@@ -182,14 +184,24 @@ function normalizeProcesso(item, modalidadeCodigo = null) {
   };
 }
 
-function keywordMatch(processo, keyword) {
+function isDivulgadaNoPncp(processo) {
+  // No PNCP, o código 1 corresponde exatamente a "Divulgada no PNCP".
+  // Mantemos também a comparação pelo nome para tolerar respostas de versões diferentes da API.
+  return (
+    processo.situacaoCompraId === SITUACAO_DIVULGADA_ID ||
+    normalizeText(processo.situacaoCompraNome) === normalizeText(SITUACAO_DIVULGADA_NOME)
+  );
+}
+
+function matches(processo, keyword) {
+  if (!keyword) return true;
+
   const terms = normalizeText(keyword)
     .split(/\s+/)
     .filter(Boolean);
 
   const haystack = normalizeText([
     processo.objeto,
-    processo.complemento,
     processo.numero,
     processo.orgao,
     processo.modalidade
@@ -198,130 +210,62 @@ function keywordMatch(processo, keyword) {
   return terms.every(term => haystack.includes(term));
 }
 
-function isOpen(processo) {
-  if (!processo.encerramento) return true;
-
-  const date = new Date(processo.encerramento);
-  if (Number.isNaN(date.getTime())) return true;
-
-  return date.getTime() >= Date.now();
+function dateBRYYYYMMDD(daysAhead = 0) {
+  const date = new Date();
+  date.setDate(date.getDate() + daysAhead);
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
 }
 
-async function queryEndpoint({ uf, keyword, modalidade = null }) {
-  const results = [];
+async function consultaModalidade(codigo, dataFinal, uf, keyword) {
+  const resultados = [];
+  const maxPages = 20;
 
-  /*
-    IMPORTANTE:
-    dataFinal não deve ser "hoje". O endpoint usa essa data para delimitar
-    o período de recebimento. Para encontrar propostas que continuam abertas
-    nos próximos dias/meses, usamos uma janela de 365 dias.
-  */
-  const dataFinal = dateBRYYYYMMDD(365);
-
-  for (let pagina = 1; pagina <= MAX_PAGES; pagina++) {
+  for (let pagina = 1; pagina <= maxPages; pagina++) {
     const params = new URLSearchParams({
       dataFinal,
+      codigoModalidadeContratacao: String(codigo),
       pagina: String(pagina),
-      tamanhoPagina: String(PAGE_SIZE)
+      tamanhoPagina: "50"
     });
 
     if (uf) params.set("uf", uf);
 
-    if (modalidade !== null) {
-      params.set(
-        "codigoModalidadeContratacao",
-        String(modalidade)
-      );
-    }
-
     const url = `${PNCP}?${params.toString()}`;
-    const payload = await fetchJson(url);
-    const items = contentOf(payload);
+    const data = await fetchJson(url);
+    const content = getContent(data);
 
-    if (!items.length) break;
+    if (!content.length) break;
 
-    for (const item of items) {
-      const processo = normalizeProcesso(item, modalidade);
+    for (const raw of content) {
+      const processo = normalizeProcesso(raw, codigo);
+
+      // A API já limita propostas abertas, mas mantemos uma segunda
+      // validação para impedir que registros encerrados apareçam.
+      const encerramento = processo.encerramento
+        ? new Date(processo.encerramento)
+        : null;
+
+      const aberto =
+        !encerramento ||
+        Number.isNaN(encerramento.getTime()) ||
+        encerramento.getTime() >= Date.now();
 
       if (
+        isDivulgadaNoPncp(processo) &&
+        aberto &&
         (!uf || processo.uf === uf) &&
-        isOpen(processo) &&
-        keywordMatch(processo, keyword)
+        matches(processo, keyword)
       ) {
-        results.push(processo);
+        resultados.push(processo);
       }
     }
 
-    const totalPages = totalPagesOf(payload);
+    const totalPages = getTotalPages(data);
 
-    if (pagina >= totalPages || items.length < PAGE_SIZE) break;
+    if (pagina >= totalPages || pagina >= maxPages) break;
   }
 
-  return results;
-}
-
-async function queryWithFallback(uf, keyword) {
-  const warnings = [];
-
-  /*
-    Primeiro tenta a forma mais nova/documentada: modalidade opcional.
-    Isso evita 13 chamadas quando a API aceitar a consulta geral.
-  */
-  try {
-    const results = await queryEndpoint({
-      uf,
-      keyword,
-      modalidade: null
-    });
-
-    return {
-      results,
-      warnings,
-      strategy: "consulta-geral"
-    };
-  } catch (error) {
-    warnings.push(`Consulta geral: ${error.message}`);
-  }
-
-  /*
-    Compatibilidade com versões da API que exigem modalidade.
-    Consulta as modalidades em paralelo em pequenos lotes.
-  */
-  const results = [];
-
-  for (let start = 0; start < Object.keys(MODALIDADES).length; start += 3) {
-    const batch = Object.keys(MODALIDADES)
-      .slice(start, start + 3)
-      .map(Number);
-
-    const settled = await Promise.allSettled(
-      batch.map(modalidade =>
-        queryEndpoint({
-          uf,
-          keyword,
-          modalidade
-        })
-      )
-    );
-
-    settled.forEach((result, index) => {
-      const modalidade = batch[index];
-
-      if (result.status === "fulfilled") {
-        results.push(...result.value);
-      } else {
-        warnings.push(
-          `${MODALIDADES[modalidade]}: ${result.reason?.message || "erro"}`
-        );
-      }
-    });
-  }
-
-  return {
-    results,
-    warnings,
-    strategy: "por-modalidade"
-  };
+  return resultados;
 }
 
 app.get("/api/processos", async (req, res) => {
@@ -344,77 +288,88 @@ app.get("/api/processos", async (req, res) => {
     });
   }
 
-  try {
-    const response = await queryWithFallback(uf, keyword);
+  // O endpoint /contratacoes/proposta usa dataFinal como limite superior
+  // do período de recebimento de propostas. Portanto, usar "hoje" aqui
+  // exclui editais que continuam abertos, mas encerram nos próximos dias.
+  // Ex.: um edital que encerra em 15/10 não aparece numa consulta com
+  // dataFinal=02/10. Consultamos os próximos 365 dias e depois filtramos
+  // novamente pela data de encerramento.
+  const dataFinal = dateBRYYYYMMDD(DIAS_A_FRENTE);
 
-    const unique = new Map();
+  const processos = [];
+  const warnings = [];
 
-    for (const processo of response.results) {
-      const id =
-        processo.controlePncp ||
-        `${processo.numero}|${processo.orgao}|${processo.encerramento}`;
+  /*
+    Não disparamos 13 chamadas simultaneamente porque a API do PNCP
+    pode aplicar limitação de requisições. As modalidades são consultadas
+    uma por uma.
+  */
+  for (const codigo of Object.keys(MODALIDADES).map(Number)) {
+    try {
+      const encontrados = await consultaModalidade(
+        codigo,
+        dataFinal,
+        uf,
+        keyword
+      );
 
-      if (!unique.has(id)) {
-        unique.set(id, processo);
-      }
+      processos.push(...encontrados);
+    } catch (error) {
+      warnings.push(
+        `${MODALIDADES[codigo]}: ${error.name === "AbortError"
+          ? "tempo limite excedido"
+          : error.message}`
+      );
     }
-
-    const processos = [...unique.values()].sort((a, b) => {
-      const da = new Date(a.encerramento || "2999-12-31").getTime();
-      const db = new Date(b.encerramento || "2999-12-31").getTime();
-      return da - db;
-    });
-
-    const data = {
-      processos,
-      warnings: response.warnings,
-      consulta: {
-        uf: uf || null,
-        keyword,
-        dataFinal: dateBRYYYYMMDD(365),
-        strategy: response.strategy,
-        fonte: PNCP
-      }
-    };
-
-    cache.set(key, {
-      at: Date.now(),
-      data
-    });
-
-    return res.json(data);
-  } catch (error) {
-    return res.status(502).json({
-      error:
-        `Não foi possível consultar o PNCP agora. ${error.message}`,
-      processos: []
-    });
   }
+
+  // Remove duplicados pelo número de controle PNCP.
+  const unique = new Map();
+
+  for (const processo of processos) {
+    const id =
+      processo.controlePncp ||
+      `${processo.numero}|${processo.orgao}|${processo.encerramento}`;
+
+    if (!unique.has(id)) unique.set(id, processo);
+  }
+
+  const final = [...unique.values()].sort((a, b) => {
+    const da = new Date(a.encerramento || "2999-12-31").getTime();
+    const db = new Date(b.encerramento || "2999-12-31").getTime();
+    return da - db;
+  });
+
+  const data = {
+    processos: final,
+    warnings,
+    consulta: {
+      uf: uf || null,
+      keyword,
+      dataFinal,
+      modalidadesConsultadas: Object.keys(MODALIDADES).length,
+      situacao: {
+        id: SITUACAO_DIVULGADA_ID,
+        nome: SITUACAO_DIVULGADA_NOME
+      },
+      periodoAteDias: DIAS_A_FRENTE,
+      criterio: "Somente contratações com situacaoCompraId=1 (Divulgada no PNCP) e data de encerramento igual ou posterior a hoje"
+    }
+  };
+
+  cache.set(key, {
+    at: Date.now(),
+    data
+  });
+
+  res.json(data);
 });
 
-app.get("/api/health", async (req, res) => {
+app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     service: "ST Processos",
-    pncp: PNCP,
-    message: "Servidor online. A busca consulta diretamente a API pública do PNCP."
-  });
-});
-
-app.get("/api/pncp-url", (req, res) => {
-  const uf = String(req.query.uf || "").trim().toUpperCase();
-  const q = String(req.query.q || "").trim();
-
-  const params = new URLSearchParams({
-    q,
-    status: "recebendo_proposta",
-    pagina: "1"
-  });
-
-  if (uf) params.set("ufs", uf);
-
-  res.json({
-    url: `https://pncp.gov.br/app/editais?${params.toString()}`
+    pncp: PNCP
   });
 });
 
