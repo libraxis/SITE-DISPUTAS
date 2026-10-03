@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: st-processos
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /api/health
-    autoDeploy: true
