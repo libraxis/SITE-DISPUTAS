@@ -159,7 +159,7 @@ async function search(event) {
 
     if (data.warnings?.length) {
       $("#notice").textContent =
-        "A pesquisa foi concluída com avisos do PNCP: " +
+        "A pesquisa foi concluída, mas o PNCP informou alguma instabilidade: " +
         data.warnings.join(" | ");
 
       $("#notice").classList.remove("hidden");
