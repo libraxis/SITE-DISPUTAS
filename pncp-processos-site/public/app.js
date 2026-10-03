@@ -84,12 +84,12 @@ function render() {
         </td>
         <td class="result-object">${esc(process.objeto || "—")}</td>
         <td class="result-value">
-          <strong>${esc(fmtMoney(process.valor))}</strong>
-          <small>Estimado/Avaliado</small>
+          <strong class="js-value">${esc(fmtMoney(process.valor))}</strong>
+          <small class="js-enrich-status">${process.enriquecimento?.status === "ok" ? "Extraído do edital" : "Consultando edital..."}</small>
         </td>
         <td class="result-dates">
-          <small><b>Início da recepção:</b> ${esc(fmtDate(process.abertura))}</small>
-          <small><b>Fim da recepção:</b> ${esc(fmtDate(process.encerramento))}</small>
+          <small><b>Início da recepção:</b> <span class="js-abertura">${esc(fmtDate(process.abertura))}</span></small>
+          <small><b>Fim da recepção:</b> <span class="js-encerramento">${esc(fmtDate(process.encerramento))}</span></small>
         </td>
         <td class="result-status">
           <span class="status-pill">${esc(process.situacaoCompraNome || "Divulgada no PNCP")}</span>
@@ -106,6 +106,36 @@ function render() {
   $("#processTable tbody").querySelectorAll(".details-btn").forEach(button => {
     button.addEventListener("click", () => openDetails(Number(button.dataset.index), rows));
   });
+}
+
+async function enrichVisibleResults() {
+  const snapshot = processos.slice();
+  const queue = snapshot.map((process, index) => ({ process, index }));
+  let cursor = 0;
+  const workers = Math.min(6, queue.length);
+
+  async function worker() {
+    while (true) {
+      const item = queue[cursor++];
+      if (!item) return;
+      try {
+        const data = await api(`/api/processos/enriquecer?id=${encodeURIComponent(item.process.controlePncp)}`);
+        const enriched = data.processo;
+        const target = processos.find(p => p.controlePncp === enriched.controlePncp);
+        if (!target) continue;
+        Object.assign(target, enriched);
+        render();
+      } catch (error) {
+        const target = processos.find(p => p.controlePncp === item.process.controlePncp);
+        if (target) {
+          target.enriquecimento = { status: "erro", erro: error.message };
+          render();
+        }
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workers }, worker));
 }
 
 function renderDiagnostics(data) {
@@ -294,7 +324,7 @@ async function search(event) {
   $("#stats").classList.add("hidden");
   $("#diagnostics").classList.add("hidden");
   $("#notice").classList.add("hidden");
-  $("#progress").textContent = "Consultando a base oficial do PNCP, filtrando a relevância e conferindo a contratação/editais para completar datas e valores...";
+  $("#progress").textContent = "Consultando a base oficial do PNCP e localizando os editais. Os dados de valor e recepção serão extraídos dos documentos em segundo plano...";
 
   try {
     const data = await api(`/api/processos?uf=${encodeURIComponent(uf)}&q=${encodeURIComponent(keyword)}`);
@@ -307,6 +337,8 @@ async function search(event) {
     $("#stats").classList.remove("hidden");
     $("#results").classList.remove("hidden");
     render();
+    // Não bloqueia a exibição dos resultados: cada edital é lido em segundo plano.
+    enrichVisibleResults();
 
     if (data.warnings?.length) {
       $("#notice").textContent = "A pesquisa foi concluída, mas houve avisos: " + data.warnings.join(" | ");
