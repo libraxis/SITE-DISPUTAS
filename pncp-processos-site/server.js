@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require("path");
 const pdfParse = require("pdf-parse");
+const AdmZip = require("adm-zip");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1104,27 +1105,66 @@ app.get("/api/processos/detalhes", async (req, res) => {
   });
 });
 
+function isZipBuffer(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07);
+}
+function isPdfBuffer(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.length >= 5 && buffer.subarray(0, 5).toString("ascii") === "%PDF-";
+}
+function scoreArchiveEntry(name) {
+  const text = normalizeText(String(name || ""));
+  let score = 0;
+  if (/edital/.test(text)) score += 100;
+  if (/aviso\s+de\s+contratacao|aviso/.test(text)) score += 80;
+  if (/pregao|licitacao|contratacao/.test(text)) score += 30;
+  if (/resultado|homologacao|ata|contrato|proposta|habilitacao/.test(text)) score -= 20;
+  return score;
+}
+function extractBestPdfFromZip(buffer) {
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries().filter(entry => !entry.isDirectory && /\.pdf$/i.test(entry.entryName));
+  entries.sort((a, b) => scoreArchiveEntry(b.entryName) - scoreArchiveEntry(a.entryName));
+  for (const entry of entries) {
+    const pdf = entry.getData();
+    if (isPdfBuffer(pdf)) return { buffer: pdf, name: entry.entryName };
+  }
+  return null;
+}
+
 app.get("/api/processos/documento", async (req, res) => {
   const id = String(req.query.id || "").trim();
   const documento = String(req.query.documento || "").trim();
+  const visualizar = String(req.query.visualizar || "") === "1";
   if (!id || !/^\d+$/.test(documento)) return res.status(400).send("Parâmetros inválidos.");
-
   const processo = normalizeProcesso({ numeroControlePNCP: id });
   const url = buildCompraApiUrl(processo, `/arquivos/${encodeURIComponent(documento)}`);
   if (!url) return res.status(400).send("Identificador PNCP inválido.");
-
   try {
     const response = await fetch(url, { headers: { Accept: "*/*", Referer: "https://pncp.gov.br/app/editais" } });
     if (!response.ok) return res.status(response.status).send(`PNCP HTTP ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const contentType = response.headers.get("content-type") || "application/octet-stream";
-    const disposition = response.headers.get("content-disposition");
-    res.setHeader("Content-Type", contentType);
-    if (disposition) res.setHeader("Content-Disposition", disposition);
-    else res.setHeader("Content-Disposition", `attachment; filename="documento-pncp-${documento}"`);
+    let buffer = Buffer.from(await response.arrayBuffer());
+    let contentType = String(response.headers.get("content-type") || "application/octet-stream").toLowerCase();
+    let filename = `documento-pncp-${documento}`;
+    if (isZipBuffer(buffer) || contentType.includes("zip") || contentType.includes("compressed")) {
+      const extracted = extractBestPdfFromZip(buffer);
+      if (visualizar) {
+        if (!extracted) return res.status(415).send("O arquivo ZIP não contém um PDF de edital/aviso que possa ser visualizado.");
+        buffer = extracted.buffer;
+        contentType = "application/pdf";
+        filename = extracted.name.split("/").pop() || "edital.pdf";
+      }
+    }
+    res.setHeader("Content-Type", contentType || "application/octet-stream");
+    if (visualizar && contentType.includes("pdf")) {
+      res.setHeader("Content-Disposition", `inline; filename="${filename.replace(/[^a-zA-Z0-9._-]/g, "_")}"`);
+    } else {
+      const disposition = response.headers.get("content-disposition");
+      if (disposition) res.setHeader("Content-Disposition", disposition);
+      else res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    }
     res.send(buffer);
   } catch (error) {
-    res.status(502).send(`Falha ao baixar documento do PNCP: ${error.message}`);
+    res.status(502).send(`Falha ao processar documento do PNCP: ${error.message}`);
   }
 });
 

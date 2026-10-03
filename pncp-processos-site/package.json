@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "express": "^5.1.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "adm-zip": "^0.5.16"
   }
 }
