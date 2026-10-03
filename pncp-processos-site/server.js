@@ -610,13 +610,24 @@ async function downloadPncpDocument(processo, doc) {
 
 async function chooseAndReadEdital(processo, docs) {
   if (!Array.isArray(docs) || !docs.length) return null;
-  const ranked = docs.slice().sort((a, b) => scoreEditalDocument(b) - scoreEditalDocument(a));
-  const errors = [];
 
-  for (const doc of ranked.slice(0, 4)) {
+  // Não basta pegar o primeiro PDF chamado "Edital": alguns processos publicam
+  // o aviso, edital, anexos e termos em arquivos separados. Lemos vários
+  // candidatos e escolhemos aquele que realmente contém as datas de propostas.
+  const ranked = docs.slice()
+    .sort((a, b) => scoreEditalDocument(b) - scoreEditalDocument(a));
+  const errors = [];
+  const candidates = [];
+
+  for (const doc of ranked.slice(0, 8)) {
     try {
       const downloaded = await downloadPncpDocument(processo, doc);
-      if (!downloaded?.buffer || downloaded.buffer.length > ENRICH_PDF_MAX_BYTES) continue;
+      if (!downloaded?.buffer) continue;
+      if (downloaded.buffer.length > ENRICH_PDF_MAX_BYTES) {
+        errors.push(`${doc.titulo || doc.nome}: arquivo maior que o limite de análise`);
+        continue;
+      }
+
       let text = "";
       try {
         const parsed = await pdfParse(downloaded.buffer);
@@ -624,12 +635,35 @@ async function chooseAndReadEdital(processo, docs) {
       } catch (error) {
         errors.push(`${doc.titulo || doc.nome}: ${error.message}`);
       }
-      return { doc, buffer: downloaded.buffer, text, url: downloaded.url, errors };
+
+      const local = text ? extractLikelyStructuredData(text) : { inicioRecepcao: null, fimRecepcao: null };
+      const dateHits = Number(Boolean(local.inicioRecepcao)) + Number(Boolean(local.fimRecepcao));
+      const titleScore = scoreEditalDocument(doc);
+      candidates.push({
+        doc,
+        buffer: downloaded.buffer,
+        text,
+        url: downloaded.url,
+        local,
+        dateHits,
+        score: titleScore + dateHits * 500,
+        errors: []
+      });
     } catch (error) {
       errors.push(`${doc.titulo || doc.nome}: ${error.message}`);
     }
   }
-  return { doc: ranked[0], buffer: null, text: "", url: ranked[0]?.url || null, errors };
+
+  if (!candidates.length) {
+    return { doc: ranked[0], buffer: null, text: "", url: ranked[0]?.url || null, errors, candidates: [] };
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+  best.errors = errors;
+  // Mantemos os demais candidatos disponíveis para a segunda etapa: se o
+  // primeiro não tiver as duas datas, o Gemini poderá analisar outro documento.
+  return { ...best, errors, candidates };
 }
 
 async function enrichOneProcesso(processo) {
@@ -678,35 +712,80 @@ async function enrichOneProcesso(processo) {
 
     if (detail.docs.length) {
       edital = await chooseAndReadEdital(processo, detail.docs);
-      if (edital?.text) {
-        const localData = extractLikelyStructuredData(edital.text);
-        aiData = {
-          inicioRecepcao: localData.inicioRecepcao,
-          fimRecepcao: localData.fimRecepcao
-        };
+      const candidates = Array.isArray(edital?.candidates) && edital.candidates.length
+        ? edital.candidates
+        : (edital ? [edital] : []);
 
-        // Quando o Gemini está configurado, ele é a fonte principal para as datas.
-        // A extração local permanece como fallback para não deixar a tabela vazia
-        // em caso de limite/erro temporário da API.
-        if (GEMINI_ENABLED) {
+      // 1) Primeiro usamos a extração local em TODOS os documentos candidatos.
+      // Isso resolve editais em que as datas estão no aviso, no edital ou em um
+      // documento complementar diferente do primeiro PDF listado pelo PNCP.
+      for (const candidate of candidates) {
+        const localData = candidate.local || (candidate.text ? extractLikelyStructuredData(candidate.text) : null);
+        if (!localData) continue;
+        if (localData.inicioRecepcao || localData.fimRecepcao) {
+          aiData = {
+            inicioRecepcao: aiData?.inicioRecepcao || localData.inicioRecepcao,
+            fimRecepcao: aiData?.fimRecepcao || localData.fimRecepcao
+          };
+        }
+        if (aiData?.inicioRecepcao && aiData?.fimRecepcao) break;
+      }
+
+      // 2) Gemini analisa os documentos com texto. Se o primeiro não tiver as
+      // duas datas, passa para os próximos candidatos em vez de desistir.
+      if (GEMINI_ENABLED && !(aiData?.inicioRecepcao && aiData?.fimRecepcao)) {
+        for (const candidate of candidates) {
+          if (!candidate.text) continue;
           try {
-            const ai = await extractDatesWithGemini(processo, edital.doc?.titulo || edital.doc?.nome, edital.text);
+            const ai = await extractDatesWithGemini(
+              processo,
+              candidate.doc?.titulo || candidate.doc?.nome,
+              candidate.text
+            );
             if (ai) {
               aiData = {
-                inicioRecepcao: ai.inicioRecepcao || localData.inicioRecepcao,
-                fimRecepcao: ai.fimRecepcao || localData.fimRecepcao
+                inicioRecepcao: aiData?.inicioRecepcao || ai.inicioRecepcao,
+                fimRecepcao: aiData?.fimRecepcao || ai.fimRecepcao
               };
             }
+            if (aiData?.inicioRecepcao && aiData?.fimRecepcao) {
+              edital = { ...edital, ...candidate };
+              break;
+            }
           } catch (error) {
-            result.enriquecimento = { status: "parcial", fonte: "PNCP + edital + Gemini", erroIA: error.message };
+            result.enriquecimento = {
+              status: "parcial",
+              fonte: "PNCP + edital + Gemini",
+              erroIA: error.message
+            };
           }
         }
-      } else if (GEMINI_ENABLED && edital?.buffer) {
-        // PDF sem camada de texto: o Gemini recebe o próprio PDF e enxerga texto/layout.
-        try {
-          aiData = await extractDatesFromPdfWithGemini(processo, edital);
-        } catch (error) {
-          result.enriquecimento = { status: "parcial", fonte: "PNCP + PDF", erroIA: error.message };
+      }
+
+      // 3) Para PDF escaneado/imagem, o Gemini recebe o PDF original. Também
+      // tentamos mais de um documento, pois o edital pode ser apenas um dos
+      // anexos publicados.
+      if (GEMINI_ENABLED && !(aiData?.inicioRecepcao && aiData?.fimRecepcao)) {
+        for (const candidate of candidates.filter(c => c.buffer)) {
+          try {
+            const ai = await extractDatesFromPdfWithGemini(processo, candidate);
+            if (ai) {
+              aiData = {
+                inicioRecepcao: aiData?.inicioRecepcao || ai.inicioRecepcao,
+                fimRecepcao: aiData?.fimRecepcao || ai.fimRecepcao
+              };
+            }
+            if (aiData?.inicioRecepcao && aiData?.fimRecepcao) {
+              edital = { ...edital, ...candidate };
+              break;
+            }
+          } catch (error) {
+            result.enriquecimento = {
+              status: "parcial",
+              fonte: "PNCP + PDF + Gemini",
+              erroIA: error.message
+            };
+          }
         }
       }
     }
