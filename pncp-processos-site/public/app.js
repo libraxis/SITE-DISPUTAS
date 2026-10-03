@@ -125,8 +125,12 @@ function renderDiagnostics(data) {
   $("#diagRaw").textContent = Number(c.rawTotal ?? 0).toLocaleString("pt-BR");
   $("#diagDivulgada").textContent = Number(c.divulgadaTotal ?? 0).toLocaleString("pt-BR");
   $("#diagAbertos").textContent = Number(c.abertosTotal ?? 0).toLocaleString("pt-BR");
-  $("#diagFound").textContent = Number(c.encontradosTotal ?? 0).toLocaleString("pt-BR");
-  $("#diagTime").textContent = `${Math.round((c.durationMs || 0) / 1000)}s`;
+  $("#diagFound").textContent = Number(c.primary?.encontrados ?? c.encontradosTotal ?? 0).toLocaleString("pt-BR");
+  $("#diagAiBefore").textContent = Number(c.candidatosAntesIA ?? c.ai?.candidatosAntes ?? 0).toLocaleString("pt-BR");
+  $("#diagAiAfter").textContent = Number(c.candidatosDepoisIA ?? c.ai?.mantidos ?? 0).toLocaleString("pt-BR");
+  $("#diagAiRemoved").textContent = Number(c.ai?.removidos ?? 0).toLocaleString("pt-BR");
+  $("#diagAiStatus").textContent = c.ai?.status === "ok" ? `ATIVO (${c.ai.model || "OpenAI"})` : (c.ai?.status || "—");
+  $("#diagTime").textContent = `${Math.round((c.tempoMs || c.durationMs || 0) / 1000)}s`;
   $("#officialSearch").href = data?.portalUrl || "https://pncp.gov.br/app/editais";
   $("#diagDetails").textContent = JSON.stringify(c, null, 2);
   box.classList.remove("hidden");
