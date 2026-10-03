@@ -120,10 +120,34 @@ async function enrichVisibleResults() {
       if (!item) return;
       try {
         const data = await api(`/api/processos/enriquecer?id=${encodeURIComponent(item.process.controlePncp)}`);
-        const enriched = data.processo;
+        const enriched = data.processo || {};
         const target = processos.find(p => p.controlePncp === enriched.controlePncp);
         if (!target) continue;
-        Object.assign(target, enriched);
+
+        // O endpoint de enriquecimento parte apenas do identificador PNCP.
+        // Portanto ele pode devolver os metadados como "Não informado" enquanto
+        // ainda não conseguiu recuperá-los. Nunca substitua dados bons da busca
+        // por esses placeholders. Só aplicamos valores efetivamente encontrados.
+        const placeholders = new Set([
+          "", "—", "Não informado", "Órgão não informado",
+          "Objeto não informado", "Não informada", null, undefined
+        ]);
+        const canReplace = value => !placeholders.has(value);
+
+        for (const [key, value] of Object.entries(enriched)) {
+          if (key === "enriquecimento") {
+            target.enriquecimento = value;
+            continue;
+          }
+          if (canReplace(value)) target[key] = value;
+        }
+
+        // Campos numéricos nulos não apagam um valor já encontrado.
+        if (enriched.valor !== null && enriched.valor !== undefined && enriched.valor !== "") {
+          target.valor = enriched.valor;
+        }
+        if (enriched.abertura) target.abertura = enriched.abertura;
+        if (enriched.encerramento) target.encerramento = enriched.encerramento;
         render();
       } catch (error) {
         const target = processos.find(p => p.controlePncp === item.process.controlePncp);
