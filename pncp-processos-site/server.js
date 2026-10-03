@@ -2,6 +2,7 @@ const express = require("express");
 const path = require("path");
 const OpenAI = require("openai");
 const pdfParse = require("pdf-parse");
+const { toFile } = require("openai/uploads");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -407,14 +408,57 @@ async function fetchBuffer(url) {
 }
 
 async function fetchPncpDocumentsForEnrichment(processo) {
-  // Não precisamos consultar "Acessar contratação" para preencher a tabela.
-  // O edital/aviso que aparece na própria seção de documentos do PNCP é a fonte
-  // usada para descobrir datas de recepção e valor estimado.
+  // A listagem de documentos é obtida diretamente pela API oficial do PNCP.
+  // Não navegamos pelo portal nem dependemos do botão "Acessar contratação".
   const base = buildCompraApiUrl(processo);
   if (!base) throw new Error("Identificador PNCP incompleto.");
   const documentosResult = await fetchJsonOptional(`${base}/arquivos`);
   const docs = extractList(documentosResult.data, ["documentos", "arquivos"]);
   return { docs, errors: documentosResult.error ? [documentosResult.error] : [] };
+}
+
+async function chooseAndReadEdital(processo, docs) {
+  if (!Array.isArray(docs) || !docs.length) return null;
+
+  const normalized = docs
+    .map((doc, index) => ({ doc, index, score: scoreEditalDocument(doc) }))
+    .sort((a, b) => b.score - a.score);
+
+  // Primeiro tenta documentos explicitamente identificados como Edital/Aviso.
+  // Se não houver, tenta os primeiros documentos para lidar com órgãos que
+  // publicam o instrumento convocatório com um título genérico.
+  const candidates = normalized.filter(x => x.score > 0).slice(0, 3);
+  if (!candidates.length) candidates.push(...normalized.slice(0, Math.min(3, normalized.length)));
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    const doc = candidate.doc;
+    const seq = doc?.sequencialDocumento ?? doc?.sequencial_documento;
+    if (seq == null) continue;
+
+    try {
+      const base = buildCompraApiUrl(processo);
+      const url = `${base}/arquivos/${encodeURIComponent(seq)}`;
+      const buffer = await fetchBuffer(url);
+      const contentType = String(doc?.contentType || doc?.tipoMime || doc?.mimeType || "").toLowerCase();
+      const title = String(doc?.titulo || doc?.nome || "").toLowerCase();
+      const isPdf = contentType.includes("pdf") || title.endsWith(".pdf") || buffer.subarray(0, 4).toString() === "%PDF";
+      if (!isPdf) continue;
+
+      const parsed = await pdfParse(buffer);
+      const text = cleanExtractedText(parsed?.text || "");
+      if (text.length > 80) return { doc, text, url, score: candidate.score };
+
+      // PDF escaneado: guarda o arquivo para uma tentativa de análise por PDF
+      // diretamente pela IA, quando a chave estiver configurada.
+      if (OPENAI_ENABLED) return { doc, text, buffer, url, score: candidate.score, scanned: true };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
 }
 
 function extractRelevantSnippets(text, maxChars = 18000) {
@@ -457,14 +501,14 @@ function extractLikelyStructuredData(text) {
   const startRe = new RegExp(`(?:in[ií]cio|abertura|a partir de)[^\\n]{0,100}(?:recep[cç][aã]o|recebimento|propostas?)[^\\n]{0,120}${date}`, "i");
   const endRe = new RegExp(`(?:fim|encerramento|at[eé])[^\\n]{0,100}(?:recep[cç][aã]o|recebimento|propostas?)[^\\n]{0,120}${date}`, "i");
   const genericStartRe = new RegExp(`(?:recep[cç][aã]o|recebimento)\\s+(?:de\\s+)?propostas?[^\\n]{0,160}${date}`, "i");
-  const genericEndRe = new RegExp(`(?:recep[cç][aã]o|recebimento)\\s+(?:de\\s+)?propostas?[^\\n]{0,160}${date}`, "i");
+  const genericEndRe = new RegExp(`(?:fim|encerramento|até|ate)[^\n]{0,100}(?:recep[cç][aã]o|recebimento|propostas?)[^\n]{0,120}${date}`, "i");
 
   const s = source.match(startRe) || source.match(genericStartRe);
   const e = source.match(endRe);
   if (s) result.inicioRecepcao = `${s[1]}${s[2] ? ` ${s[2]}` : ""}`;
   if (e) result.fimRecepcao = `${e[1]}${e[2] ? ` ${e[2]}` : ""}`;
 
-  const money = /(?:valor\s+(?:total\s+)?estimado|valor\s+estimado|or[cç]amento\s+estimado|valor\s+m[aá]ximo)[^R$0-9]{0,80}R?\$?\s*([0-9]{1,3}(?:\\.[0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:,[0-9]{2}))/i;
+  const money = /(?:valor\s+(?:total\s+)?estimado|valor\s+estimado|or[cç]amento\s+estimado|valor\s+m[aá]ximo)[^R$0-9]{0,80}R?\$?\s*([0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:,[0-9]{2}))/i;
   const m = source.match(money);
   if (m) result.valorEstimado = parseMoneyText(m[1]);
   return result;
@@ -507,6 +551,37 @@ async function extractDatesWithOpenAI(processo, documentTitle, text) {
   return safeJsonParse(response.output_text);
 }
 
+async function extractDatesFromPdfWithOpenAI(processo, edital) {
+  if (!OPENAI_ENABLED || !edital?.buffer) return null;
+  const file = await openai.files.create({
+    file: await toFile(edital.buffer, String(edital.doc?.titulo || "edital.pdf").replace(/[^a-zA-Z0-9._-]/g, "_") || "edital.pdf", { type: "application/pdf" }),
+    purpose: "user_data"
+  });
+  try {
+    const response = await openai.responses.create({
+      model: OPENAI_MODEL,
+      store: false,
+      input: [{
+        role: "user",
+        content: [
+          { type: "input_file", file_id: file.id },
+          { type: "input_text", text: `Leia este edital/aviso oficial do processo ${processo.controlePncp}. Extraia somente: início do recebimento de propostas, fim do recebimento de propostas e valor total estimado/valor estimado. Não confunda com sessão pública, data de publicação ou prazo de execução. Retorne null quando não houver informação explícita.` }
+        ]
+      }],
+      text: { format: { type: "json_schema", name: "dados_edital_pdf", strict: true, schema: {
+        type: "object", properties: {
+          inicioRecepcao: { anyOf: [{ type: "string" }, { type: "null" }] },
+          fimRecepcao: { anyOf: [{ type: "string" }, { type: "null" }] },
+          valorEstimado: { anyOf: [{ type: "number" }, { type: "null" }] }
+        }, required: ["inicioRecepcao", "fimRecepcao", "valorEstimado"], additionalProperties: false
+      } } }
+    }, { timeout: OPENAI_TIMEOUT_MS, maxRetries: 1 });
+    return safeJsonParse(response.output_text);
+  } finally {
+    try { await openai.files.delete(file.id); } catch (_) {}
+  }
+}
+
 async function enrichOneProcesso(processo) {
   const key = processo.controlePncp || `${processo.cnpjCompra}|${processo.anoCompra}|${processo.sequencialCompra}`;
   const cached = enrichCache.get(key);
@@ -520,6 +595,34 @@ async function enrichOneProcesso(processo) {
   };
 
   try {
+    const baseUrl = buildCompraApiUrl(processo);
+    if (!baseUrl) throw new Error("Identificador PNCP incompleto.");
+
+    // O endpoint de busca pode devolver somente o identificador PNCP em alguns
+    // registros. Recarregamos os metadados oficiais da contratação para não
+    // deixar órgão, modalidade, objeto e valor vazios na tabela.
+    const contratacaoResult = await fetchJsonOptional(baseUrl);
+    const c = contratacaoResult.data || {};
+    if (c) {
+      const org = c.orgaoEntidade || {};
+      const unidade = c.unidadeOrgao || {};
+      result.valor = c.valorTotalEstimado ?? c.valorTotalHomologado ?? result.valor;
+      result.abertura = c.dataAberturaProposta || c.dataInicioRecebimentoProposta || result.abertura;
+      result.encerramento = c.dataEncerramentoProposta || c.dataFimRecebimentoProposta || result.encerramento;
+      processo.orgao = processo.orgao && processo.orgao !== "Órgão não informado" ? processo.orgao : (org.razaoSocial || org.razaoSocialOrgao || org.nome || processo.orgao);
+      processo.unidade = processo.unidade || unidade.nomeUnidade || unidade.nome || "";
+      processo.uf = processo.uf || String(unidade.ufSigla || org.ufSigla || "").toUpperCase();
+      processo.municipio = processo.municipio || unidade.municipioNome || "";
+      processo.objeto = processo.objeto && processo.objeto !== "Objeto não informado" ? processo.objeto : (c.objetoCompra || processo.objeto);
+      processo.modalidade = processo.modalidade && processo.modalidade !== "Não informada" ? processo.modalidade : (c.modalidadeNome || processo.modalidade);
+      processo.modoDisputaNome = processo.modoDisputaNome || c.modoDisputaNome || "";
+      processo.situacaoCompraNome = processo.situacaoCompraNome || c.situacaoCompraNome || "Divulgada no PNCP";
+      processo.fonte = processo.fonte || c.usuarioNome || c.fontePlataforma || "";
+      processo.processo = processo.processo || c.processo || "";
+      processo.numero = processo.numero && processo.numero !== processo.controlePncp ? processo.numero : (c.numeroCompra || c.numeroEdital || processo.numero);
+      processo.complemento = processo.complemento || c.informacaoComplementar || "";
+    }
+
     const detail = await fetchPncpDocumentsForEnrichment(processo);
     let aiData = null;
     let edital = null;
@@ -532,8 +635,17 @@ async function enrichOneProcesso(processo) {
         const localData = extractLikelyStructuredData(edital.text);
         aiData = localData;
 
+        // Se o PDF for escaneado e não tiver camada de texto, a IA recebe o PDF.
+        if (OPENAI_ENABLED && edital.buffer && !edital.text) {
+          try {
+            aiData = await extractDatesFromPdfWithOpenAI(processo, edital);
+          } catch (error) {
+            result.enriquecimento = { status: "parcial", fonte: "PNCP + edital", erroIA: error.message };
+          }
+        }
+
         // A IA só é chamada para completar o que não foi identificado localmente.
-        if (OPENAI_ENABLED && (!localData.inicioRecepcao || !localData.fimRecepcao || localData.valorEstimado == null)) {
+        if (OPENAI_ENABLED && !edital.buffer && (!localData.inicioRecepcao || !localData.fimRecepcao || localData.valorEstimado == null)) {
           try {
             const ai = await extractDatesWithOpenAI(processo, edital.doc?.titulo || edital.doc?.nome, edital.text);
             if (ai) {
