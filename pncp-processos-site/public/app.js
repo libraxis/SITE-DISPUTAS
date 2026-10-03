@@ -283,14 +283,15 @@ function renderDetails(data, base) {
       <div class="section-title-row"><h4>Documentos do edital</h4><span class="section-count">${docs.length}</span></div>
       ${docs.length ? `<div class="documents-list">${docs.map(doc => `
         <div class="document-row">
-          <div class="document-icon">PDF</div>
+          <div class="document-icon">DOC</div>
           <div class="document-info">
             <strong>${esc(doc.titulo || "Documento")}</strong>
             <small>${esc(doc.tipoDocumentoNome || "Documento")} • Publicado em ${esc(fmtDateOnly(doc.dataPublicacaoPncp))}</small>
           </div>
           <div class="document-actions">
+            ${doc.sequencialDocumento ? `<a class="secondary-link" href="/api/processos/documento?id=${encodeURIComponent(base.controlePncp)}&documento=${encodeURIComponent(doc.sequencialDocumento)}&visualizar=1" target="_blank" rel="noopener">Visualizar</a>` : ""}
             ${doc.sequencialDocumento ? `<a class="secondary-link" href="/api/processos/documento?id=${encodeURIComponent(base.controlePncp)}&documento=${encodeURIComponent(doc.sequencialDocumento)}">Baixar</a>` : ""}
-            ${doc.url ? `<a class="secondary-link" href="${esc(doc.url)}" target="_blank" rel="noopener">Abrir</a>` : ""}
+            ${doc.url ? `<a class="secondary-link" href="${esc(doc.url)}" target="_blank" rel="noopener">Original</a>` : ""}
           </div>
         </div>
       `).join("")}</div>` : `<div class="empty-detail">Nenhum documento foi disponibilizado pelo PNCP para esta contratação.</div>`}
