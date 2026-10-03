@@ -294,7 +294,7 @@ async function search(event) {
   $("#stats").classList.add("hidden");
   $("#diagnostics").classList.add("hidden");
   $("#notice").classList.add("hidden");
-  $("#progress").textContent = "Consultando a base oficial do PNCP e filtrando a relevância...";
+  $("#progress").textContent = "Consultando a base oficial do PNCP, filtrando a relevância e conferindo a contratação/editais para completar datas e valores...";
 
   try {
     const data = await api(`/api/processos?uf=${encodeURIComponent(uf)}&q=${encodeURIComponent(keyword)}`);
