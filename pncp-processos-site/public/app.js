@@ -498,14 +498,75 @@ async function editCredential(cnpj) {
     const data = await api("/api/admin/credentials");
     const user = data.users.find(item => item.cnpj === cnpj);
     if (!user) return;
-    $("#credentialOriginalCnpj").value = user.cnpj;
-    $("#credentialCnpj").value = user.cnpj;
-    $("#credentialCompany").value = user.nomeEmpresa || "";
-    $("#credentialPassword").value = "";
-    $("#credentialSaveBtn").textContent = "Salvar alterações";
-    $("#credentialCancelBtn").classList.remove("hidden");
-    $("#credentialCnpj").focus();
+
+    $("#credentialDetailsOriginalCnpj").value = user.cnpj;
+    $("#credentialDetailsCnpj").value = user.cnpj;
+    $("#credentialDetailsCompany").value = user.nomeEmpresa || "";
+    $("#credentialDetailsPasswordDisplay").value = "••••••••";
+    $("#credentialDetailsNewPassword").value = "";
+    $("#credentialNewPasswordWrap").classList.add("hidden");
+    $("#credentialDetailsCancelPasswordBtn").classList.add("hidden");
+    $("#credentialDetailsModal").classList.remove("hidden");
+    $("#credentialDetailsCompany").focus();
   } catch (error) { toast(error.message, true); }
+}
+
+function closeCredentialDetails() {
+  $("#credentialDetailsModal").classList.add("hidden");
+  $("#credentialNewPasswordWrap").classList.add("hidden");
+  $("#credentialDetailsCancelPasswordBtn").classList.add("hidden");
+  $("#credentialDetailsNewPassword").value = "";
+}
+
+function enableCredentialPasswordChange() {
+  $("#credentialNewPasswordWrap").classList.remove("hidden");
+  $("#credentialDetailsCancelPasswordBtn").classList.remove("hidden");
+  $("#credentialDetailsNewPassword").focus();
+}
+
+function cancelCredentialPasswordChange() {
+  $("#credentialNewPasswordWrap").classList.add("hidden");
+  $("#credentialDetailsCancelPasswordBtn").classList.add("hidden");
+  $("#credentialDetailsNewPassword").value = "";
+}
+
+async function saveCredentialDetails(event) {
+  event.preventDefault();
+  const original = $("#credentialDetailsOriginalCnpj").value.trim();
+  const payload = {
+    cnpj: $("#credentialDetailsCnpj").value.trim(),
+    nomeEmpresa: $("#credentialDetailsCompany").value.trim(),
+    senha: $("#credentialDetailsNewPassword").value
+  };
+  const btn = $("#credentialDetailsSaveBtn");
+  btn.disabled = true;
+  try {
+    await api(`/api/admin/credentials/${encodeURIComponent(original)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+    toast("Credencial atualizada.");
+    closeCredentialDetails();
+    await loadCredentials();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteCredentialFromDetails() {
+  const cnpj = $("#credentialDetailsOriginalCnpj").value.trim();
+  if (!cnpj) return;
+  if (!confirm(`Excluir o acesso da empresa ${cnpj}? O usuário será deslogado e não poderá entrar novamente.`)) return;
+  try {
+    await api(`/api/admin/credentials/${encodeURIComponent(cnpj)}`, { method: "DELETE" });
+    toast("Usuário excluído.");
+    closeCredentialDetails();
+    await loadCredentials();
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 async function saveCredential(event) {
@@ -603,6 +664,12 @@ $("#logoutBtn").addEventListener("click", () => logoutLocal());
 $("#credentialForm").addEventListener("submit", saveCredential);
 $("#credentialCancelBtn").addEventListener("click", resetCredentialForm);
 $("#refreshCredentialsBtn").addEventListener("click", loadCredentials);
+$("#credentialDetailsForm").addEventListener("submit", saveCredentialDetails);
+$("#closeCredentialDetails").addEventListener("click", closeCredentialDetails);
+$("#credentialDetailsModal").addEventListener("click", event => { if (event.target === $("#credentialDetailsModal")) closeCredentialDetails(); });
+$("#changeCredentialPasswordBtn").addEventListener("click", enableCredentialPasswordChange);
+$("#credentialDetailsCancelPasswordBtn").addEventListener("click", cancelCredentialPasswordChange);
+$("#credentialDetailsDeleteBtn").addEventListener("click", deleteCredentialFromDetails);
 $("#maintenanceToggle").addEventListener("change", toggleMaintenance);
 $("#refreshActiveUsersBtn").addEventListener("click", loadActiveUsers);
 document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
@@ -617,7 +684,11 @@ document.addEventListener("click", event => {
   toast("Baixando documentos, por favor aguarde. Documentos que possuem mais folhas são mais pesados, demorando um pouco mais para efetuar o download.");
 });
 
-document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("#detailsModal").classList.contains("hidden")) closeDetails(); });
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (!$("#detailsModal").classList.contains("hidden")) closeDetails();
+  if (!$("#credentialDetailsModal").classList.contains("hidden")) closeCredentialDetails();
+});
 
 
 window.currentView = "buscar";

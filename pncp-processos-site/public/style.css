@@ -299,3 +299,24 @@ body.app-locked > .sidebar, body.app-locked > .main, body.app-locked > #horizont
 .auth-user{padding:9px 10px;border:1px solid #26354a;border-radius:9px;color:#dce5f4;background:#172236;font-size:11px;line-height:1.35}.auth-user strong{display:block;color:#fff;font-size:12px}.sidebar-logout{border:1px solid #2a3850;background:transparent;color:#b8c5d8;text-align:center;padding:9px 12px;border-radius:9px}.sidebar-logout:hover{background:#1d2a3e;color:#fff}
 .admin-hero{margin-bottom:18px}.admin-form{display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:12px;align-items:end;margin-top:20px}.admin-form-actions{display:flex;gap:8px;align-items:center}.admin-table{width:100%;border-collapse:collapse}.admin-table th,.admin-table td{padding:12px 13px;border-bottom:1px solid #e5e9ef;text-align:left;font-size:12px;vertical-align:middle}.admin-table th{background:#f6f8fb;color:#65738a;font-size:10px;text-transform:uppercase;letter-spacing:.05em}.admin-table td strong{display:block}.admin-table .table-actions{display:flex;gap:7px;flex-wrap:wrap}.danger-btn{border:1px solid #efc7c7;background:#fff5f5;color:#a32020;border-radius:8px;padding:8px 10px;font-size:11px;font-weight:700}.danger-btn:hover{background:#ffe9e9}.maintenance-card{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px;border:1px solid #e1e6ee;border-radius:11px}.maintenance-card p{margin:5px 0 0;font-size:12px;line-height:1.45}.switch{position:relative;width:52px;height:30px;flex:0 0 auto}.switch input{opacity:0;width:0;height:0}.switch span{position:absolute;inset:0;border-radius:999px;background:#cbd3df;cursor:pointer;transition:.2s}.switch span:before{content:"";position:absolute;width:22px;height:22px;left:4px;top:4px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2);transition:.2s}.switch input:checked + span{background:#2457d6}.switch input:checked + span:before{transform:translateX(22px)}
 @media (max-width:900px){.admin-form{grid-template-columns:1fr}.admin-form-actions{grid-column:auto}.maintenance-card{align-items:flex-start}.login-card{padding:24px}}
+
+/* Ajustes do menu administrativo e detalhes de credenciais */
+.nav {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  line-height: 1.25;
+  font-size: 12px;
+}
+.credential-details-panel { width: min(620px, 100%); }
+.credential-details-form { display: grid; gap: 14px; }
+.credential-details-form label { display: grid; gap: 7px; font-size: 12px; font-weight: 700; color: #4e5c71; }
+.credential-password-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: end; }
+.credential-password-row .ghost { white-space: nowrap; }
+.credential-details-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+@media (max-width: 900px) {
+  .nav { font-size: 12px; }
+  .credential-password-row { grid-template-columns: 1fr; }
+}

@@ -262,6 +262,36 @@
     </div>
   </div>
 
+  <div id="credentialDetailsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="credentialDetailsTitle">
+    <div class="modal-panel credential-details-panel">
+      <div class="modal-header">
+        <div>
+          <div class="eyebrow">ADMINISTRAÇÃO</div>
+          <h2 id="credentialDetailsTitle">Detalhes da empresa</h2>
+          <p class="muted">Visualize e altere as credenciais desta empresa.</p>
+        </div>
+        <button id="closeCredentialDetails" class="close-modal" type="button" aria-label="Fechar">×</button>
+      </div>
+      <form id="credentialDetailsForm" class="modal-content credential-details-form">
+        <input type="hidden" id="credentialDetailsOriginalCnpj">
+        <label>Empresa<input id="credentialDetailsCompany" required></label>
+        <label>CNPJ<input id="credentialDetailsCnpj" required></label>
+        <div class="credential-password-row">
+          <label>Senha<input id="credentialDetailsPasswordDisplay" type="text" value="••••••••" readonly></label>
+          <button id="changeCredentialPasswordBtn" class="ghost" type="button">Alterar senha</button>
+        </div>
+        <div id="credentialNewPasswordWrap" class="hidden">
+          <label>Nova senha<input id="credentialDetailsNewPassword" type="password" placeholder="Digite a nova senha"></label>
+        </div>
+        <div class="credential-details-actions">
+          <button id="credentialDetailsSaveBtn" class="primary" type="submit">Salvar alterações</button>
+          <button id="credentialDetailsCancelPasswordBtn" class="ghost hidden" type="button">Cancelar alteração de senha</button>
+          <button id="credentialDetailsDeleteBtn" class="danger-btn" type="button">Excluir empresa</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="horizontalScrollProxy" aria-label="Rolagem horizontal da tabela" role="scrollbar" tabindex="0"><div id="horizontalScrollProxyInner"></div></div>
   <script src="/app.js"></script>
 </body>
