@@ -238,7 +238,7 @@ function renderDetails(data, base) {
           </div>
           <div class="document-actions">
             ${doc.sequencialDocumento ? `<a class="secondary-link" href="/api/processos/documento?id=${encodeURIComponent(base.controlePncp)}&documento=${encodeURIComponent(doc.sequencialDocumento)}&visualizar=1" target="_blank" rel="noopener">Visualizar</a>` : ""}
-            ${doc.sequencialDocumento ? `<a class="secondary-link" href="/api/processos/documento?id=${encodeURIComponent(base.controlePncp)}&documento=${encodeURIComponent(doc.sequencialDocumento)}">Baixar</a>` : ""}
+            ${doc.sequencialDocumento ? `<a class="secondary-link download-document" href="/api/processos/documento?id=${encodeURIComponent(base.controlePncp)}&documento=${encodeURIComponent(doc.sequencialDocumento)}">Baixar</a>` : ""}
             ${doc.url ? `<a class="secondary-link" href="${esc(doc.url)}" target="_blank" rel="noopener">Original</a>` : ""}
           </div>
         </div>
@@ -415,6 +415,12 @@ $("#resultFilter").addEventListener("input", render);
 $("#refreshBtn").addEventListener("click", () => { if ($("#keyword").value.trim()) search({ preventDefault() {} }); });
 $("#closeDetails").addEventListener("click", closeDetails);
 $("#detailsModal").addEventListener("click", event => { if (event.target === $("#detailsModal")) closeDetails(); });
+document.addEventListener("click", event => {
+  const downloadLink = event.target.closest("a.download-document");
+  if (!downloadLink) return;
+  toast("Baixando documentos, por favor aguarde. Documentos que possuem mais folhas são mais pesados, demorando um pouco mais para efetuar o download.");
+});
+
 document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("#detailsModal").classList.contains("hidden")) closeDetails(); });
 
 
