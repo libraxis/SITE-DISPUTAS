@@ -58,6 +58,26 @@ const PNCP_PROPOSTA = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta
 const PNCP_PUBLICACAO = "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao";
 const PNCP_PORTAL = "https://pncp.gov.br/app/editais";
 const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
+const PNCP_API_BASES = [
+  "https://pncp.gov.br/api/pncp",
+  "https://www.pncp.gov.br/api/pncp",
+  "https://pncp.gov.br/pncp-api",
+  "https://www.pncp.gov.br/pncp-api"
+];
+// Camadas oficiais alternativas usadas SOMENTE para listar/baixar documentos.
+// A busca de processos permanece a mesma da V20.
+const PNCP_FILE_LIST_BASES = [
+  "https://pncp.gov.br/api/pncp/v1",
+  "https://pncp.gov.br/pncp-api/v1",
+  "https://www.pncp.gov.br/api/pncp/v1",
+  "https://www.pncp.gov.br/pncp-api/v1"
+];
+const PNCP_FILE_DOWNLOAD_BASES = [
+  "https://pncp.gov.br/pncp-api/v1",
+  "https://pncp.gov.br/api/pncp/v1",
+  "https://www.pncp.gov.br/pncp-api/v1",
+  "https://www.pncp.gov.br/api/pncp/v1"
+];
 
 const CACHE_MS = 2 * 60 * 1000;
 const SEARCH_PAGE_SIZE = 50;
@@ -841,18 +861,17 @@ async function extractDatesFromPdfWithGemini(processo, edital) {
 
 
 async function probePncpDocumentSequences(processo, maxSeq = 20) {
-  const base = buildCompraApiUrl(processo);
-  if (!base) return [];
-  const found = [];
+  const urls = buildFileApiUrls(processo);
+  if (!urls.length) return [];
+  const found = new Map();
   let cursor = 1;
-  const concurrency = 5;
-  async function worker() {
-    while (true) {
-      const seq = cursor++;
-      if (seq > maxSeq) return;
-      const url = `${base}/arquivos/${seq}`;
+  const concurrency = 6;
+
+  async function tryOne(seq) {
+    for (const baseUrl of urls) {
+      const url = `${baseUrl}/arquivos/${seq}`;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 7000);
+      const timer = setTimeout(() => controller.abort(), 6000);
       try {
         const response = await fetch(url, {
           method: "GET",
@@ -863,61 +882,76 @@ async function probePncpDocumentSequences(processo, maxSeq = 20) {
           },
           signal: controller.signal
         });
-        if (response.ok) {
-          const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-          const disposition = String(response.headers.get("content-disposition") || "");
-          const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
-          let nome = filenameMatch ? decodeURIComponent(filenameMatch[1].replace(/^"|"$/g, "")) : `Documento ${seq}`;
-          if (/json|html/.test(contentType)) {
-            try { await response.body?.cancel(); } catch (_) {}
-            return;
-          }
-          found.push({
-            sequencialDocumento: seq,
-            titulo: nome,
-            nome,
-            tipoDocumentoId: null,
-            tipoDocumentoNome: /pdf/.test(contentType) ? "PDF" : "Documento",
-            dataPublicacaoPncp: null,
-            url
-          });
+        if (!response.ok) continue;
+        const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+        const disposition = String(response.headers.get("content-disposition") || "");
+        const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+        let nome = filenameMatch ? decodeURIComponent(filenameMatch[1].replace(/^"|"$/g, "")) : `Documento ${seq}`;
+        if (/json|html/.test(contentType)) {
+          try { await response.body?.cancel(); } catch (_) {}
+          continue;
         }
+        found.set(seq, {
+          sequencialDocumento: seq,
+          titulo: nome,
+          nome,
+          tipoDocumentoId: null,
+          tipoDocumentoNome: /pdf/.test(contentType) ? "PDF" : "Documento",
+          dataPublicacaoPncp: null,
+          url
+        });
         try { await response.body?.cancel(); } catch (_) {}
+        return;
       } catch (_) {
-        // Sequência inexistente, indisponibilidade ou timeout: simplesmente passa ao próximo.
+        // Tenta a próxima base oficial.
       } finally {
         clearTimeout(timer);
       }
     }
   }
+
+  async function worker() {
+    while (true) {
+      const seq = cursor++;
+      if (seq > maxSeq) return;
+      await tryOne(seq);
+    }
+  }
   await Promise.all(Array.from({ length: concurrency }, worker));
-  return found.sort((a, b) => Number(a.sequencialDocumento) - Number(b.sequencialDocumento));
+  return [...found.values()].sort((a, b) => Number(a.sequencialDocumento) - Number(b.sequencialDocumento));
 }
 
 async function fetchPncpDocumentsForEnrichment(processo) {
-  const url = buildCompraApiUrl(processo, "/arquivos");
-  if (!url) return { docs: [], errors: ["Identificador PNCP incompleto para consulta de documentos."] };
-  try {
-    const data = await fetchJsonWithOptions(url, { timeoutMs: DETAIL_DOCUMENTOS_TIMEOUT_MS, retries: DETAIL_RETRIES });
-    if (data.error) throw new Error(data.error);
-    const docs = extractList(data.data, ["documentos", "arquivos"]).map(doc => ({
-      sequencialDocumento: doc?.sequencialDocumento ?? doc?.sequencial_documento ?? null,
-      titulo: doc?.titulo || doc?.nome || "Documento",
-      nome: doc?.nome || doc?.titulo || "Documento",
-      tipoDocumentoId: doc?.tipoDocumentoId ?? doc?.tipo_documento_id ?? null,
-      tipoDocumentoNome: doc?.tipoDocumentoNome || doc?.tipo_documento_nome || "Documento",
-      dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
-      url: doc?.url || doc?.link || null
-    })).filter(doc => doc.sequencialDocumento != null || doc.url);
-    if (docs.length) return { docs, errors: [] };
-    const probed = await probePncpDocumentSequences(processo, 20);
-    if (probed.length) return { docs: probed, errors: ["A lista de documentos do PNCP veio vazia; documentos recuperados diretamente pelos arquivos individuais."] };
-    return { docs: [], errors: ["O PNCP respondeu sem documentos."] };
-  } catch (error) {
-    const probed = await probePncpDocumentSequences(processo, 20);
-    if (probed.length) return { docs: probed, errors: [error.message, "Documentos recuperados diretamente pelos arquivos individuais."] };
-    return { docs: [], errors: [error.message] };
+  const urls = buildFileApiUrls(processo, "/arquivos", "list");
+  if (!urls.length) return { docs: [], errors: ["Identificador PNCP incompleto para consulta de documentos."] };
+  const errors = [];
+
+  // Primeiro tenta a listagem oficial. Alguns nós antigos aceitam também
+  // pagina/tamanhoPagina; testamos as duas formas sem depender de uma delas.
+  const listUrls = [...new Set(urls.flatMap(url => [
+    url,
+    `${url}?pagina=1&tamanhoPagina=500`
+  ]))];
+
+  // Primeiro tenta a listagem oficial. O manual do PNCP define esta rota como
+  // a consulta de todos os documentos da contratação.
+  for (const url of listUrls) {
+    try {
+      const data = await fetchJsonWithOptions(url, { timeoutMs: 12000, retries: 3 });
+      if (data.error) { errors.push(`${url}: ${data.error}`); continue; }
+      const docs = extractDocumentList(data.data);
+      if (docs.length) return { docs, errors };
+    } catch (error) {
+      errors.push(`${url}: ${error.message}`);
+    }
   }
+
+  // Se a listagem estiver fora do ar, os arquivos individuais continuam sendo
+  // consultáveis em muitas janelas de indisponibilidade. O PNCP atribui um
+  // sequencial a cada arquivo; por isso fazemos uma descoberta controlada.
+  const probed = await probePncpDocumentSequences(processo, 20);
+  if (probed.length) return { docs: probed, errors: [...errors, "Lista de documentos indisponível; documentos recuperados diretamente pelas rotas oficiais de arquivo."] };
+  return { docs: [], errors: errors.length ? errors : ["O PNCP respondeu sem documentos."] };
 }
 
 function scoreEditalDocument(doc) {
@@ -937,14 +971,13 @@ async function downloadPncpDocument(processo, doc) {
   const candidates = [];
   if (doc?.url) candidates.push(doc.url);
   if (doc?.sequencialDocumento != null) {
-    const base = buildCompraApiUrl(processo, `/arquivos/${encodeURIComponent(doc.sequencialDocumento)}`);
-    if (base) candidates.push(base);
+    candidates.push(...buildFileApiUrls(processo, `/arquivos/${encodeURIComponent(doc.sequencialDocumento)}`));
   }
 
   let lastError = null;
   for (const url of [...new Set(candidates)]) {
     try {
-      const response = await fetch(url, { headers: { Accept: "application/pdf,application/octet-stream,*/*" } });
+      const response = await fetch(url, { headers: { Accept: "application/pdf,application/octet-stream,*/*", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36", Referer: "https://pncp.gov.br/app/editais" } });
       if (!response.ok) throw new Error(`HTTP ${response.status} ao baixar documento`);
       const contentType = String(response.headers.get("content-type") || "").toLowerCase();
       const buffer = Buffer.from(await response.arrayBuffer());
@@ -1421,11 +1454,8 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
 async function fallbackPropostaApi(uf, keyword, diagnostics) {
   const found = [];
   const dataFinal = formatDateYYYYMMDD();
-  // O PNCP aplica rate-limit agressivo nesta API. Não fazemos mais dezenas de
-  // chamadas concorrentes. Começamos pela modalidade mais comum para licitações
-  // de bens/serviços e só percorremos as demais se necessário.
-  const modalidades = [6, 7, 4, 5, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15];
-  const maxPages = 3;
+  const modalidades = [6, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+  const maxPages = 20;
   const tamanhoPagina = 50;
   let rawTotal = 0;
   let pagesRead = 0;
@@ -1435,10 +1465,12 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
   let detailRecovered = 0;
   const modalityStats = [];
 
-  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
+  // A API /proposta historicamente foi documentada com codigoModalidadeContratacao
+  // obrigatório. Mesmo quando algumas versões aceitam a omissão, o PNCP pode
+  // devolver uma amostra muito pequena. Por isso o fallback percorre todas as
+  // modalidades conhecidas, mantendo UF e paginação, e deduplica no final.
   async function scanModalidade(codigo) {
-    const local = { codigo, nome: MODALIDADES[codigo] || `Modalidade ${codigo}`, paginas: 0, registros: 0, encontrados: 0, rejeitadosTermo: 0, recuperadosPorDetalhe: 0, erros: 0 };
+    const local = { codigo, nome: MODALIDADES[codigo] || `Modalidade ${codigo}`, paginas: 0, registros: 0, encontrados: 0, rejeitadosTermo: 0, recuperadosPorDetalhe: 0 };
     const localFound = [];
     for (let pagina = 1; pagina <= maxPages; pagina++) {
       const params = new URLSearchParams({
@@ -1448,89 +1480,78 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
         tamanhoPagina: String(tamanhoPagina)
       });
       if (uf) params.set("uf", uf);
-
-      try {
-        const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
-        const items = getArray(data);
-        local.paginas++;
-        local.registros += items.length;
-
-        for (const raw of items) {
-          let processo = normalizeProcesso(raw, codigo);
-          if (uf && processo.uf && processo.uf !== uf) {
-            rejectedUf++;
-            continue;
-          }
-
-          let isMatch = matches(processo, keyword);
-          // O resumo de algumas plataformas não traz o objeto completo.
-          // Só consultamos o detalhe quando já temos uma contratação candidata,
-          // evitando a tempestade de requisições que causava 429.
-          if (!isMatch && processo.cnpjCompra && processo.anoCompra && processo.sequencialCompra) {
-            try {
-              const detail = await fetchJson(buildCompraApiUrl(processo));
-              const detailed = normalizeProcesso(detail || raw, codigo);
-              processo = { ...processo, ...detailed,
-                controlePncp: detailed.controlePncp || processo.controlePncp,
-                cnpjCompra: detailed.cnpjCompra || processo.cnpjCompra,
-                anoCompra: detailed.anoCompra || processo.anoCompra,
-                sequencialCompra: detailed.sequencialCompra || processo.sequencialCompra };
-              isMatch = matches(processo, keyword);
-              if (isMatch) { detailRecovered++; local.recuperadosPorDetalhe++; }
-            } catch (_) {}
-          }
-
-          if (!isMatch) { rejectedKeyword++; local.rejeitadosTermo++; continue; }
-          matchedRaw++;
-          local.encontrados++;
-          localFound.push(processo);
+      const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
+      const items = getArray(data);
+      local.paginas++;
+      local.registros += items.length;
+      for (const raw of items) {
+        let processo = normalizeProcesso(raw);
+        if (uf && processo.uf && processo.uf !== uf) {
+          rejectedUf++;
+          continue;
         }
-
-        if (!items.length || items.length < tamanhoPagina) break;
-        await sleep(900);
-      } catch (error) {
-        local.erros++;
-        local.status = error.status || null;
-        local.erro = error.message;
-        // 429 é um sinal para NÃO continuar martelando o endpoint.
-        if (error.status === 429) {
-          local.rateLimited = true;
-          break;
+        let isMatch = matches(processo, keyword);
+        if (!isMatch && processo.cnpjCompra && processo.anoCompra && processo.sequencialCompra) {
+          try {
+            const detail = await fetchJson(buildCompraApiUrl(processo));
+            const detailed = normalizeProcesso(detail || raw, codigo);
+            processo = { ...processo, ...detailed,
+              controlePncp: detailed.controlePncp || processo.controlePncp,
+              cnpjCompra: detailed.cnpjCompra || processo.cnpjCompra,
+              anoCompra: detailed.anoCompra || processo.anoCompra,
+              sequencialCompra: detailed.sequencialCompra || processo.sequencialCompra };
+            isMatch = matches(processo, keyword);
+            if (isMatch) { detailRecovered++; local.recuperadosPorDetalhe++; }
+          } catch (_) {}
         }
-        // Um erro de uma modalidade não invalida as outras.
-        break;
+        if (!isMatch) { rejectedKeyword++; local.rejeitadosTermo++; continue; }
+        matchedRaw++;
+        local.encontrados++;
+        localFound.push(processo);
       }
+      if (!items.length) break;
+      // O PNCP pode devolver páginas parciais mesmo quando ainda há registros.
+      // Só paramos por página vazia; o total/paginação real é tratado sem assumir
+      // que uma página curta significa fim da coleção.
+      await new Promise(resolve => setTimeout(resolve, 700));
     }
     return { local, localFound };
   }
 
-  // Sequencial de propósito: o limite do PNCP é por origem/IP e chamadas
-  // paralelas transformam uma consulta válida em uma sequência de HTTP 429.
-  for (const codigo of modalidades) {
-    // Pequena pausa entre modalidades para respeitar o rate-limit do PNCP.
-    if (modalityStats.length) await sleep(1400);
-    const result = await scanModalidade(codigo);
+  // Uma modalidade por vez: o PNCP aplica rate-limit agressivo e retornar 429
+  // aqui destrói a pesquisa inteira. Pregão Eletrônico (6) é priorizado.
+  const concurrency = 1;
+  let cursor = 0;
+  const results = [];
+  async function worker() {
+    while (true) {
+      const i = cursor++;
+      if (i >= modalidades.length) return;
+      try { results[i] = await scanModalidade(modalidades[i]); }
+      catch (error) {
+        results[i] = { local: { codigo: modalidades[i], nome: MODALIDADES[modalidades[i]], erro: error.message, status: error.status || null, paginas: 0, registros: 0, encontrados: 0 }, localFound: [] };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+
+  const byId = new Map();
+  for (const result of results) {
+    if (!result) continue;
     modalityStats.push(result.local);
     rawTotal += result.local.registros || 0;
     pagesRead += result.local.paginas || 0;
     for (const processo of result.localFound) {
       const id = processo.controlePncp || `${processo.cnpjCompra}|${processo.anoCompra}|${processo.sequencialCompra}`;
-      if (id && !found.some(x => (x.controlePncp || `${x.cnpjCompra}|${x.anoCompra}|${x.sequencialCompra}`) === id)) found.push(processo);
+      if (!byId.has(id)) byId.set(id, processo);
     }
-
-    // Encontrou resultados: não há motivo para continuar consumindo a API.
-    if (found.length) break;
-
-    // Se o PNCP sinalizou rate-limit, pare imediatamente. O publicacao fallback
-    // terá uma chance posterior, sem gerar outra rajada concorrente.
-    if (result.local.rateLimited) break;
   }
+  found.push(...byId.values());
 
   diagnostics.fallback = {
     endpoint: PNCP_PROPOSTA,
     dataFinal,
-    uf,
-    modo: "V20 compatível + consulta sequencial anti-rate-limit",
+    modalidades: modalidades,
     paginasLidas: pagesRead,
     registrosRecebidos: rawTotal,
     encontrados: found.length,
@@ -1540,18 +1561,34 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
     rejeitadosPorTermo: rejectedKeyword,
     rejeitadosPorUF: rejectedUf,
     recuperadosPorDetalhe: detailRecovered,
-    modalidadesConsultadas: modalityStats.map(x => x.codigo),
     modalidadesDetalhadas: modalityStats
   };
   return found;
 }
 
-function buildCompraApiUrl(processo, suffix = "") {
+function buildCompraApiUrls(processo, suffix = "") {
   const cnpj = String(processo?.cnpjCompra || "").trim();
   const ano = String(processo?.anoCompra || "").trim();
   const seq = String(processo?.sequencialCompra || "").trim();
-  if (!cnpj || !/^\d{4}$/.test(ano) || !/^\d+$/.test(seq)) return null;
-  return `${PNCP_API_BASE}/v1/orgaos/${encodeURIComponent(cnpj)}/compras/${encodeURIComponent(ano)}/${encodeURIComponent(seq)}${suffix}`;
+  if (!cnpj || !/^\d{4}$/.test(ano) || !/^\d+$/.test(seq)) return [];
+  return PNCP_API_BASES.map(base =>
+    `${base}/v1/orgaos/${encodeURIComponent(cnpj)}/compras/${encodeURIComponent(ano)}/${encodeURIComponent(seq)}${suffix}`
+  );
+}
+
+function buildCompraApiUrl(processo, suffix = "") {
+  return buildCompraApiUrls(processo, suffix)[0] || null;
+}
+
+function buildFileApiUrls(processo, suffix = "", kind = "download") {
+  const cnpj = String(processo?.cnpjCompra || "").trim();
+  const ano = String(processo?.anoCompra || "").trim();
+  const seq = String(processo?.sequencialCompra || "").trim();
+  if (!cnpj || !/^\d{4}$/.test(ano) || !/^\d+$/.test(seq)) return [];
+  const bases = kind === "list" ? PNCP_FILE_LIST_BASES : PNCP_FILE_DOWNLOAD_BASES;
+  return bases.map(base =>
+    `${base}/orgaos/${encodeURIComponent(cnpj)}/compras/${encodeURIComponent(ano)}/${encodeURIComponent(seq)}${suffix}`
+  );
 }
 
 function extractList(data, keys = []) {
@@ -1607,6 +1644,16 @@ async function fetchJsonWithOptions(url, { timeoutMs = 8000, retries = 2 } = {})
   return { data: null, error: lastError?.name === "AbortError" ? `Tempo limite de ${timeoutMs / 1000}s excedido.` : (lastError?.message || "Falha ao consultar o PNCP.") };
 }
 
+async function fetchFirstWorkingJson(urls, options = {}) {
+  const errors = [];
+  for (const url of (urls || []).filter(Boolean)) {
+    const result = await fetchJsonWithOptions(url, options);
+    if (result.data) return { ...result, url, errors };
+    errors.push(`${url}: ${result.error}`);
+  }
+  return { data: null, error: errors[errors.length - 1] || "Nenhuma URL disponível.", errors };
+}
+
 app.get("/api/processos/detalhes", async (req, res) => {
   const controle = String(req.query.id || "").trim();
   if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
@@ -1616,10 +1663,11 @@ app.get("/api/processos/detalhes", async (req, res) => {
     return res.status(400).json({ error: "Não foi possível identificar CNPJ, ano e sequencial a partir do ID PNCP." });
   }
 
-  const base = buildCompraApiUrl(processoBase);
+  const compraUrls = buildCompraApiUrls(processoBase);
   const urls = {
-    contratacao: base,
-    documentos: buildCompraApiUrl(processoBase, "/arquivos"),
+    contratacao: compraUrls[0] || null,
+    contratacaoAlternativas: compraUrls,
+    documentos: buildFileApiUrls(processoBase, "/arquivos", "list")[0] || buildCompraApiUrl(processoBase, "/arquivos"),
     itens: buildCompraApiUrl(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
     historico: buildCompraApiUrl(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
     fontesOrcamentarias: buildCompraApiUrl(processoBase, "/fonte-orcamentaria"),
@@ -1627,16 +1675,16 @@ app.get("/api/processos/detalhes", async (req, res) => {
     atas: buildCompraApiUrl(processoBase, "/atas")
   };
 
-  // Na abertura do modal buscamos somente o essencial, mas damos mais tempo ao
-  // PNCP para as rotas de contratação e arquivos. Essas duas rotas são justamente
-  // as que alimentam os dados principais e a lista de editais/documentos.
-  const contratacao = await fetchJsonWithOptions(urls.contratacao, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: DETAIL_RETRIES });
-  const documentos = await fetchJsonWithOptions(urls.documentos, { timeoutMs: DETAIL_DOCUMENTOS_TIMEOUT_MS, retries: DETAIL_RETRIES });
-
-  const docs = extractList(documentos.data, ["documentos", "arquivos", "listaDocumentos", "listaArquivos"]);
+  // O Chrome do usuário pode estar recebendo 503 de um host/rota do PNCP enquanto
+  // outro host oficial responde normalmente. Por isso o detalhe tenta os hosts
+  // oficiais em sequência antes de declarar a contratação indisponível.
+  const contratacao = await fetchFirstWorkingJson(compraUrls, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: 2 });
+  const documentoResult = await fetchPncpDocumentsForEnrichment(processoBase);
+  const embeddedDocs = extractDocumentList(contratacao.data);
+  const docs = documentoResult.docs?.length ? documentoResult.docs : embeddedDocs;
   const errors = [];
   if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
-  if (documentos.error) errors.push(`documentos: ${documentos.error}`);
+  if (documentoResult.errors?.length) errors.push(...documentoResult.errors.map(e => `documentos: ${e}`));
 
   res.json({
     ok: Boolean(contratacao.data),
@@ -1649,7 +1697,7 @@ app.get("/api/processos/detalhes", async (req, res) => {
       tipoDocumentoId: doc?.tipoDocumentoId ?? doc?.tipo_documento_id ?? null,
       tipoDocumentoNome: doc?.tipoDocumentoNome || doc?.tipo_documento_nome || "Documento",
       dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
-      url: doc?.url || doc?.link || null
+      url: doc?.url || doc?.urlDownload || doc?.uri || doc?.link || null
     })),
     itens: [], historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
     extrasPendentes: true,
@@ -1732,11 +1780,26 @@ app.get("/api/processos/documento", async (req, res) => {
   const visualizar = String(req.query.visualizar || "") === "1";
   if (!id || !/^\d+$/.test(documento)) return res.status(400).send("Parâmetros inválidos.");
   const processo = normalizeProcesso({ numeroControlePNCP: id });
-  const url = buildCompraApiUrl(processo, `/arquivos/${encodeURIComponent(documento)}`);
-  if (!url) return res.status(400).send("Identificador PNCP inválido.");
+  const urls = buildFileApiUrls(processo, `/arquivos/${encodeURIComponent(documento)}`);
+  if (!urls.length) return res.status(400).send("Identificador PNCP inválido.");
   try {
-    const response = await fetch(url, { headers: { Accept: "*/*", Referer: "https://pncp.gov.br/app/editais" } });
-    if (!response.ok) return res.status(response.status).send(`PNCP HTTP ${response.status}`);
+    let response = null;
+    let lastStatus = 503;
+    let lastError = null;
+    for (const url of urls) {
+      try {
+        const candidate = await fetch(url, {
+          headers: {
+            Accept: "application/pdf,application/octet-stream,*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+            Referer: "https://pncp.gov.br/app/editais"
+          }
+        });
+        lastStatus = candidate.status;
+        if (candidate.ok) { response = candidate; break; }
+      } catch (error) { lastError = error; }
+    }
+    if (!response) return res.status(lastStatus || 503).send(`PNCP não disponibilizou o documento. ${lastError?.message || `HTTP ${lastStatus}`}`);
     let buffer = Buffer.from(await response.arrayBuffer());
     let contentType = String(response.headers.get("content-type") || "application/octet-stream").toLowerCase();
     let filename = `documento-pncp-${documento}`;
