@@ -1,5 +1,7 @@
 const express = require("express");
 const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
 const pdfParse = require("pdf-parse");
 const AdmZip = require("adm-zip");
 
@@ -49,6 +51,245 @@ process.stdout.write = function(chunk, encoding, callback) {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// -----------------------------
+// Autenticação e administração
+// -----------------------------
+const DATA_DIR = path.join(__dirname, "data");
+const CREDENTIALS_FILE = path.join(DATA_DIR, "credentials.json");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+const SESSION_COOKIE = "st_processos_session";
+const sessions = new Map();
+
+function ensureAuthStorage() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(CREDENTIALS_FILE)) fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify({ users: [] }, null, 2));
+  if (!fs.existsSync(SETTINGS_FILE)) fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ maintenance: false }, null, 2));
+}
+ensureAuthStorage();
+
+function readJsonFile(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (_) { return fallback; }
+}
+function writeJsonFile(file, value) {
+  const temp = `${file}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2));
+  fs.renameSync(temp, file);
+}
+function readCredentials() {
+  const data = readJsonFile(CREDENTIALS_FILE, { users: [] });
+  return { users: Array.isArray(data.users) ? data.users : [] };
+}
+function writeCredentials(users) { writeJsonFile(CREDENTIALS_FILE, { users }); }
+function readSettings() {
+  const data = readJsonFile(SETTINGS_FILE, { maintenance: false });
+  return { maintenance: Boolean(data.maintenance) };
+}
+function writeSettings(settings) { writeJsonFile(SETTINGS_FILE, { maintenance: Boolean(settings.maintenance) }); }
+function normalizeLogin(value) { return String(value || "").trim().toLowerCase(); }
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.scryptSync(String(password), salt, 64).toString("hex");
+  return { salt, hash };
+}
+function verifyPassword(password, record) {
+  if (!record?.passwordHash || !record?.passwordSalt) return false;
+  const derived = crypto.scryptSync(String(password), record.passwordSalt, 64).toString("hex");
+  try { return crypto.timingSafeEqual(Buffer.from(derived, "hex"), Buffer.from(record.passwordHash, "hex")); }
+  catch (_) { return false; }
+}
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+  return Object.fromEntries(header.split(";").map(part => part.trim()).filter(Boolean).map(part => {
+    const i = part.indexOf("=");
+    return i < 0 ? [part, ""] : [part.slice(0, i), decodeURIComponent(part.slice(i + 1))];
+  }));
+}
+function getSession(req) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt < Date.now()) { sessions.delete(token); return null; }
+  return { token, ...session };
+}
+function setSessionCookie(res, token) {
+  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`);
+}
+function clearSessionCookie(res) {
+  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
+function clientIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.socket.remoteAddress || "Desconhecido";
+}
+function createSession(role, username, name, req) {
+  const token = crypto.randomBytes(32).toString("hex");
+  sessions.set(token, {
+    role, username, name: name || username, ip: clientIp(req),
+    createdAt: Date.now(), expiresAt: Date.now() + 8 * 60 * 60 * 1000
+  });
+  return token;
+}
+function publicSession(session) {
+  return session ? { authenticated: true, role: session.role, username: session.username, name: session.name, ip: session.ip } : { authenticated: false };
+}
+function maintenanceMessage() {
+  return "O site está fechado para manutenções, somente o administrador pode ter acesso. Tente novamente em alguns minutos ou entre em contato com a administração.";
+}
+function requireAuth(req, res, next) {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: "Sessão expirada. Faça login novamente.", code: "AUTH_REQUIRED" });
+  if (readSettings().maintenance && session.role !== "admin") {
+    sessions.delete(session.token);
+    clearSessionCookie(res);
+    return res.status(423).json({ error: maintenanceMessage(), code: "MAINTENANCE" });
+  }
+  req.userSession = session;
+  next();
+}
+
+app.post("/api/auth/login", (req, res) => {
+  const usernameRaw = String(req.body?.cnpj || "").trim();
+  const password = String(req.body?.senha || "");
+  const username = normalizeLogin(usernameRaw);
+  // Credencial administrativa solicitada pelo proprietário do sistema.
+  if (username === "adm" && password === "RAESK") {
+    const token = createSession("admin", "adm", "Administrador", req);
+    setSessionCookie(res, token);
+    return res.json({ ok: true, user: publicSession(sessions.get(token)), maintenance: readSettings().maintenance });
+  }
+
+  if (readSettings().maintenance) return res.status(423).json({ error: maintenanceMessage(), code: "MAINTENANCE" });
+
+  const user = readCredentials().users.find(item => normalizeLogin(item.cnpj) === username);
+  if (!user || !verifyPassword(password, user)) return res.status(401).json({ error: "CNPJ ou senha inválidos", code: "INVALID_CREDENTIALS" });
+  const token = createSession("user", user.cnpj, user.nomeEmpresa || user.cnpj, req);
+  setSessionCookie(res, token);
+  res.json({ ok: true, user: publicSession(sessions.get(token)), maintenance: false });
+});
+
+app.get("/api/auth/me", (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ authenticated: false });
+  if (readSettings().maintenance && session.role !== "admin") {
+    sessions.delete(session.token);
+    clearSessionCookie(res);
+    return res.status(423).json({ error: maintenanceMessage(), code: "MAINTENANCE" });
+  }
+  res.json({ user: publicSession(session), maintenance: readSettings().maintenance });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  const session = getSession(req);
+  if (session) sessions.delete(session.token);
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.get("/api/auth/status", (req, res) => {
+  const session = getSession(req);
+  const settings = readSettings();
+  if (session && settings.maintenance && session.role !== "admin") {
+    sessions.delete(session.token);
+    clearSessionCookie(res);
+    return res.status(423).json({ error: maintenanceMessage(), code: "MAINTENANCE" });
+  }
+  res.json({ ok: true, user: publicSession(session), maintenance: settings.maintenance });
+});
+
+app.use("/api/processos", requireAuth);
+app.use("/api/pncp-url", requireAuth);
+
+app.get("/api/admin/credentials", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const users = readCredentials().users.map(({ cnpj, nomeEmpresa, createdAt, updatedAt }) => ({ cnpj, nomeEmpresa, createdAt, updatedAt }));
+  res.json({ users });
+});
+
+app.post("/api/admin/credentials", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const cnpj = String(req.body?.cnpj || "").trim();
+  const nomeEmpresa = String(req.body?.nomeEmpresa || "").trim();
+  const senha = String(req.body?.senha || "");
+  if (!cnpj || cnpj.toLowerCase() === "adm" || !nomeEmpresa || senha.length < 4) return res.status(400).json({ error: "Informe CNPJ, nome da empresa e uma senha com pelo menos 4 caracteres." });
+  const data = readCredentials();
+  if (data.users.some(user => normalizeLogin(user.cnpj) === normalizeLogin(cnpj))) return res.status(409).json({ error: "Este CNPJ já está cadastrado." });
+  const hp = hashPassword(senha);
+  data.users.push({ cnpj, nomeEmpresa, passwordSalt: hp.salt, passwordHash: hp.hash, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  writeCredentials(data.users);
+  res.json({ ok: true });
+});
+
+app.put("/api/admin/credentials/:cnpj", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const original = decodeURIComponent(req.params.cnpj || "");
+  const data = readCredentials();
+  const user = data.users.find(item => normalizeLogin(item.cnpj) === normalizeLogin(original));
+  if (!user) return res.status(404).json({ error: "Usuário não encontrado." });
+  const newCnpj = String(req.body?.cnpj || user.cnpj).trim();
+  const nomeEmpresa = String(req.body?.nomeEmpresa || user.nomeEmpresa).trim();
+  const senha = String(req.body?.senha || "");
+  if (!newCnpj || newCnpj.toLowerCase() === "adm" || !nomeEmpresa) return res.status(400).json({ error: "CNPJ e nome da empresa são obrigatórios." });
+  if (normalizeLogin(newCnpj) !== normalizeLogin(user.cnpj) && data.users.some(item => normalizeLogin(item.cnpj) === normalizeLogin(newCnpj))) return res.status(409).json({ error: "O novo CNPJ já está cadastrado." });
+  user.cnpj = newCnpj;
+  user.nomeEmpresa = nomeEmpresa;
+  if (senha) {
+    if (senha.length < 4) return res.status(400).json({ error: "A senha deve possuir pelo menos 4 caracteres." });
+    const hp = hashPassword(senha); user.passwordSalt = hp.salt; user.passwordHash = hp.hash;
+  }
+  user.updatedAt = new Date().toISOString();
+  writeCredentials(data.users);
+  // Se o CNPJ foi alterado, derruba sessões antigas desse usuário para forçar novo login.
+  for (const [token, session] of sessions) if (session.role === "user" && normalizeLogin(session.username) === normalizeLogin(original)) sessions.delete(token);
+  res.json({ ok: true });
+});
+
+app.delete("/api/admin/credentials/:cnpj", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const cnpj = decodeURIComponent(req.params.cnpj || "");
+  const data = readCredentials();
+  const exists = data.users.some(item => normalizeLogin(item.cnpj) === normalizeLogin(cnpj));
+  if (!exists) return res.status(404).json({ error: "Usuário não encontrado." });
+  data.users = data.users.filter(item => normalizeLogin(item.cnpj) !== normalizeLogin(cnpj));
+  writeCredentials(data.users);
+  for (const [token, session] of sessions) if (session.role === "user" && normalizeLogin(session.username) === normalizeLogin(cnpj)) sessions.delete(token);
+  res.json({ ok: true });
+});
+
+app.get("/api/admin/settings", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  res.json(readSettings());
+});
+
+app.post("/api/admin/maintenance", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const enabled = Boolean(req.body?.enabled);
+  writeSettings({ maintenance: enabled });
+  if (enabled) {
+    for (const [token, session] of sessions) if (session.role !== "admin") sessions.delete(token);
+  }
+  res.json({ ok: true, maintenance: enabled });
+});
+
+app.get("/api/admin/active-users", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const now = Date.now();
+  const users = [];
+  for (const [token, session] of sessions) {
+    if (session.expiresAt <= now) { sessions.delete(token); continue; }
+    users.push({ token, username: session.username, name: session.name, role: session.role, ip: session.ip, since: session.createdAt });
+  }
+  res.json({ users });
+});
+
+app.post("/api/admin/active-users/:token/logout", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const token = String(req.params.token || "");
+  const target = sessions.get(token);
+  if (target && target.role !== "admin") sessions.delete(token);
+  res.json({ ok: true });
+});
+
 
 // API usada pelo próprio portal de pesquisa do PNCP.
 const PNCP_SEARCH = "https://pncp.gov.br/api/search/";
