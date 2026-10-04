@@ -1739,6 +1739,48 @@ async function fetchFirstWorkingJson(urls, options = {}) {
   return { data: null, error: errors[errors.length - 1] || "Nenhuma URL disponível.", errors };
 }
 
+// Consultas abertas na tela de Detalhes usam uma estratégia própria, mais
+// conservadora que a busca: uma URL por vez e sem rajadas de retries. Isso evita
+// transformar um 503/429 momentâneo do PNCP em dezenas de requisições adicionais.
+// A rotina de busca não utiliza esta função e permanece inalterada.
+async function fetchDetailJson(urls, { timeoutMs = 12000 } = {}) {
+  const errors = [];
+  for (const url of (urls || []).filter(Boolean)) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+          Referer: "https://pncp.gov.br/app/editais"
+        },
+        signal: controller.signal
+      });
+      const body = await response.text();
+      if (!response.ok) {
+        errors.push(`${url}: PNCP HTTP ${response.status}: ${body.slice(0, 220)}`);
+        continue;
+      }
+      try {
+        return { data: body.trim() ? JSON.parse(body) : {}, url, errors };
+      } catch (error) {
+        errors.push(`${url}: resposta JSON inválida (${error.message})`);
+      }
+    } catch (error) {
+      errors.push(`${url}: ${error?.name === "AbortError" ? `tempo limite de ${timeoutMs / 1000}s` : (error?.message || "falha de rede")}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { data: null, error: errors[errors.length - 1] || "Nenhuma URL de detalhes respondeu.", errors };
+}
+
+function extractDetailItems(data) {
+  return extractList(data, ["itens", "itensCompra", "listaItens", "content"]);
+}
+
 function buildConsultaUrls(pathname, params = {}) {
   const query = new URLSearchParams(params);
   const suffix = query.toString() ? `${pathname}?${query}` : pathname;
@@ -1834,7 +1876,7 @@ app.get("/api/processos/detalhes", async (req, res) => {
   // O Chrome do usuário pode estar recebendo 503 de um host/rota do PNCP enquanto
   // outro host oficial responde normalmente. Por isso o detalhe tenta os hosts
   // oficiais em sequência antes de declarar a contratação indisponível.
-  let contratacao = await fetchFirstWorkingJson(compraUrls, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: 2 });
+  let contratacao = await fetchDetailJson(compraUrls, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS });
   const documentoResult = await fetchPncpDocumentsForEnrichment(processoBase);
   const embeddedDocs = extractDocumentList(contratacao.data);
   const docs = documentoResult.docs?.length ? documentoResult.docs : embeddedDocs;
@@ -1870,10 +1912,10 @@ app.get("/api/processos/detalhes", async (req, res) => {
       dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
       url: doc?.url || doc?.urlDownload || doc?.uri || doc?.link || null
     })),
-    itens: [], historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
+    itens: extractDetailItems(contratacao.data), historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
     extrasPendentes: true,
-    endpoints: urls,
-    erros: errors
+    endpoints: { ...urls, contratacaoUtilizada: contratacao.url || null },
+    erros: [...errors, ...(contratacao.errors || [])]
   });
 });
 
@@ -1914,34 +1956,35 @@ app.get("/api/processos/detalhes-extras", async (req, res) => {
     };
     const names = Object.keys(urls);
     const results = {};
-    let cursor = 0;
-    async function worker() {
-      while (true) {
-        const index = cursor++;
-        if (index >= names.length) return;
-        const name = names[index];
-        try {
-          results[name] = await fetchFirstWorkingJson(urls[name], { timeoutMs: 15000, retries: 2 });
-        } catch (error) {
-          results[name] = { data: null, error: error?.message || "Falha ao consultar o PNCP." };
-        }
-      }
-    }
-    await Promise.all([worker(), worker()]);
-
     const erros = [];
-    for (const [name, result] of Object.entries(results)) {
+    const urlsUtilizadas = {};
+
+    // IMPORTANTE: as consultas complementares são sequenciais. A versão anterior
+    // disparava vários endpoints simultaneamente e ainda repetia cada tentativa
+    // em vários hosts. Em períodos de rate limit do PNCP isso fazia os detalhes
+    // receberem 429 e terminarem com itens/histórico vazios.
+    for (const name of names) {
+      const result = await fetchDetailJson(urls[name], { timeoutMs: 15000 });
+      results[name] = result;
+      urlsUtilizadas[name] = result.url || null;
       if (result?.error) erros.push(`${name}: ${result.error}`);
     }
+
+    // Algumas respostas da contratação já trazem os itens em itensCompra.
+    // Usamos isso como fallback quando a rota /itens não responder ou vier vazia.
+    const itens = extractDetailItems(results.itens?.data);
+    const itensDaContratacao = itens.length ? itens : extractDetailItems(results.contratacao?.data);
+
     res.json({
       ok: true,
-      itens: extractList(results.itens?.data, ["itens"]),
+      itens: itensDaContratacao,
       historico: extractList(results.historico?.data, ["listaEventos", "eventos", "historico"]),
       fontesOrcamentarias: results.fontesOrcamentarias?.data || null,
       contratos: extractList(results.contratos?.data, ["contratos", "itens", "content"]),
       atas: extractList(results.atas?.data, ["atas", "content"]),
       erros,
-      endpoints: urls
+      endpoints: urls,
+      urlsUtilizadas
     });
   } catch (error) {
     // Nunca derruba a rota de detalhes por falha de uma consulta complementar.
