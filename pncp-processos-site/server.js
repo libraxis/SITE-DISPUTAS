@@ -54,8 +54,12 @@ const PORT = process.env.PORT || 3000;
 const PNCP_SEARCH = "https://pncp.gov.br/api/search/";
 const PNCP_SEARCH_ALTERNATE = "https://www.pncp.gov.br/api/search/";
 // API oficial de consulta, usada como fallback.
-const PNCP_PROPOSTA = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
-const PNCP_PUBLICACAO = "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao";
+const PNCP_CONSULTA_BASES = [
+  "https://pncp.gov.br/api/consulta/v1",
+  "https://www.pncp.gov.br/api/consulta/v1"
+];
+const PNCP_PROPOSTA = `${PNCP_CONSULTA_BASES[0]}/contratacoes/proposta`;
+const PNCP_PUBLICACAO = `${PNCP_CONSULTA_BASES[0]}/contratacoes/publicacao`;
 const PNCP_PORTAL = "https://pncp.gov.br/app/editais";
 const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 // O portal público também expõe a camada de arquivos por /pncp-api/v1.
@@ -211,6 +215,18 @@ async function fetchJson(url) {
   }
 
   throw lastError || new Error("Falha desconhecida ao consultar o PNCP.");
+}
+
+async function fetchJsonFromBases(pathAndQuery) {
+  let lastError = null;
+  for (const base of PNCP_CONSULTA_BASES) {
+    try {
+      return await fetchJson(`${base}${pathAndQuery}`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Falha ao consultar as APIs de consulta do PNCP.");
 }
 
 
@@ -1357,7 +1373,7 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
   // Inclui os códigos atuais e os códigos legados que ainda aparecem em bases
   // históricas do PNCP.
   const modalidades = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,99,100];
-  const maxPages = 6;
+  const maxPages = 20;
   const tamanhoPagina = 50;
   const stats = [];
   let cursor = 0;
@@ -1375,7 +1391,7 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
       });
       if (uf) params.set("uf", uf);
       try {
-        const data = await fetchJson(`${PNCP_PUBLICACAO}?${params}`);
+        const data = await fetchJsonFromBases(`/contratacoes/publicacao?${params}`);
         const items = getArray(data);
         st.paginas++;
         st.registros += items.length;
@@ -1404,7 +1420,7 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
           st.encontrados++;
           arr.push(processo);
         }
-        if (!items.length || items.length < tamanhoPagina) break;
+        if (!items.length) break;
       } catch (error) {
         st.erros++;
         // Um código de modalidade indisponível não deve matar o fallback inteiro.
@@ -1452,8 +1468,12 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
 async function fallbackPropostaApi(uf, keyword, diagnostics) {
   const found = [];
   const dataFinal = formatDateYYYYMMDD();
+  // O PNCP pode devolver páginas menores que tamanhoPagina sem que a coleção
+  // tenha terminado. Por isso NÃO usamos mais "items.length < tamanhoPagina"
+  // como condição de parada. Isso era o motivo de a busca parar na primeira
+  // página com apenas 20 registros e nunca chegar a processos como o de Cascavel.
   const tamanhoPagina = 50;
-  const maxPages = 20;
+  const maxPages = 60;
   let rawTotal = 0;
   let pagesRead = 0;
   let matchedRaw = 0;
@@ -1461,14 +1481,13 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
   let rejectedUf = 0;
   const pageStats = [];
 
-  // IMPORTANTE: a API oficial /contratacoes/proposta NÃO exige modalidade.
-  // A versão anterior percorria cada modalidade separadamente e recebia apenas
-  // uma amostra minúscula (em alguns momentos 3 registros), fazendo uma licitação
-  // perfeitamente válida desaparecer da busca. Primeiro consultamos a coleção
-  // completa de contratações com propostas abertas e só depois filtramos texto/UF.
-  // Isso é exatamente o serviço descrito no Manual de Consultas do PNCP.
+  const terms = normalizeText(keyword).split(/\s+/).filter(Boolean);
+
   async function scanUnfiltered(localUf) {
     const localFound = [];
+    let consecutiveEmpty = 0;
+    let apiTotalPages = 0;
+
     for (let pagina = 1; pagina <= maxPages; pagina++) {
       const params = new URLSearchParams({
         dataFinal,
@@ -1479,27 +1498,41 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
 
       let data;
       try {
-        data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
+        data = await fetchJsonFromBases(`/contratacoes/proposta?${params}`);
       } catch (error) {
         pageStats.push({ pagina, uf: localUf || 'TODAS', erro: error.message, status: error.status || null });
-        // Uma falha transitória não invalida as páginas que já foram coletadas.
         continue;
       }
 
       const items = getArray(data);
+      const total = getTotal(data);
+      const totalPages = Number(data?.totalPaginas ?? data?.totalPaginasConsulta ?? data?.total_pages ?? 0) || 0;
+      if (totalPages) apiTotalPages = totalPages;
+      else if (total && Number.isFinite(total)) apiTotalPages = Math.ceil(total / tamanhoPagina);
+
       pagesRead++;
       rawTotal += items.length;
-      const stat = { pagina, uf: localUf || 'TODAS', registros: items.length, correspondencias: 0, rejeitadosTermo: 0, rejeitadosUf: 0 };
+      const stat = {
+        pagina,
+        uf: localUf || 'TODAS',
+        registros: items.length,
+        correspondencias: 0,
+        rejeitadosTermo: 0,
+        rejeitadosUf: 0,
+        totalInformado: total || null,
+        totalPaginasInformado: totalPages || null
+      };
+
+      if (!items.length) consecutiveEmpty++; else consecutiveEmpty = 0;
 
       for (const raw of items) {
-        let processo = normalizeProcesso(raw);
+        const processo = normalizeProcesso(raw);
         const rawText = normalizeText(JSON.stringify(raw));
         const searchable = normalizeText([
           processo.objeto, processo.complemento, processo.numero, processo.processo,
           processo.orgao, processo.unidade, processo.municipio, processo.modalidade,
-          rawText
+          processo.controlePncp, rawText
         ].join(' '));
-        const terms = normalizeText(keyword).split(/\s+/).filter(Boolean);
         const termMatch = terms.every(t => searchable.includes(t));
 
         if (localUf && processo.uf && processo.uf !== localUf) {
@@ -1519,16 +1552,16 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
       }
       pageStats.push(stat);
 
-      // A API é paginada. Página curta significa fim da coleção.
-      if (items.length < tamanhoPagina) break;
-      await new Promise(resolve => setTimeout(resolve, 250));
+      // Só paramos quando o servidor informa o total de páginas, quando a
+      // página vem vazia, ou após duas páginas vazias consecutivas. Uma página
+      // curta (ex.: 3 ou 20 registros) NÃO significa mais fim da coleção.
+      if (apiTotalPages && pagina >= apiTotalPages) break;
+      if (!items.length && consecutiveEmpty >= 1) break;
+      if (pagina < maxPages) await new Promise(resolve => setTimeout(resolve, 180));
     }
     return localFound;
   }
 
-  // Primeiro usa a UF solicitada. Se por algum motivo o filtro UF do PNCP
-  // estiver degradado, uma segunda passagem sem UF ainda consegue recuperar a
-  // contratação e a filtragem local aplica a UF corretamente.
   let localFound = await scanUnfiltered(uf);
   if (!localFound.length && uf) {
     localFound = await scanUnfiltered('');
@@ -1543,13 +1576,14 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
 
   diagnostics.fallback = {
     endpoint: PNCP_PROPOSTA,
+    endpointsTentados: PNCP_CONSULTA_BASES.map(base => `${base}/contratacoes/proposta`),
     dataFinal,
     uf,
-    modo: 'consulta sem modalidade + filtro local por texto/UF',
+    modo: 'consulta sem modalidade + paginação real + filtro local por texto/UF',
     paginasLidas: pagesRead,
     registrosRecebidos: rawTotal,
     encontrados: found.length,
-    limite: `${maxPages} páginas`,
+    limite: `${maxPages} páginas por consulta`,
     tamanhoPagina,
     correspondenciasAntesDeDuplicar: matchedRaw,
     rejeitadosPorTermo: rejectedKeyword,
