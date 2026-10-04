@@ -289,12 +289,38 @@ async function openDetails(index, sourceRows = processos) {
 
     // Segunda etapa, somente para o edital que o usuário abriu. Isso evita
     // consultar PDFs/datas/itens/histórico de dezenas de resultados durante a pesquisa.
+    let currentData = data;
     if (data.extrasPendentes) {
       try {
         const extras = await api(`/api/processos/detalhes-extras?id=${encodeURIComponent(process.controlePncp)}`);
-        renderDetails({ ...data, ...extras, extrasPendentes: false }, process);
+        currentData = { ...data, ...extras, extrasPendentes: false };
+        renderDetails(currentData, process);
       } catch (extraError) {
-        renderDetails({ ...data, extrasPendentes: false, erros: [...(data.erros || []), `Dados complementares: ${extraError.message}`] }, process);
+        currentData = { ...data, extrasPendentes: false, erros: [...(data.erros || []), `Dados complementares: ${extraError.message}`] };
+        renderDetails(currentData, process);
+      }
+    }
+
+    // Se o PNCP não trouxe as datas diretamente na contratação, agora que o
+    // usuário abriu o processo lemos os documentos do edital. O resultado é
+    // aplicado ao mesmo modal sem bloquear a primeira renderização.
+    const c = currentData.contratacao || {};
+    const hasStart = Boolean(c.dataAberturaProposta || c.dataInicioRecebimentoProposta || process.abertura);
+    const hasEnd = Boolean(c.dataEncerramentoProposta || c.dataFimRecebimentoProposta || process.encerramento);
+    if (!hasStart || !hasEnd) {
+      try {
+        const enriched = await api(`/api/processos/enriquecer?id=${encodeURIComponent(process.controlePncp)}`);
+        if (enriched?.processo) {
+          const mergedBase = { ...process, ...enriched.processo };
+          renderDetails(currentData, mergedBase);
+        }
+      } catch (enrichError) {
+        // A lista de documentos continua utilizável mesmo se a leitura do PDF
+        // ou do Gemini estiver indisponível.
+        const warning = `Leitura das datas no edital: ${enrichError.message}`;
+        const errors = [...(currentData.erros || [])];
+        if (!errors.includes(warning)) errors.push(warning);
+        renderDetails({ ...currentData, erros: errors }, process);
       }
     }
   } catch (error) {
