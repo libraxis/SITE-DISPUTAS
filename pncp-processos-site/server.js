@@ -60,8 +60,11 @@ const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 const CACHE_MS = 2 * 60 * 1000;
 const SEARCH_PAGE_SIZE = 50;
 const SEARCH_MAX_PAGES = 5;
-const REQUEST_TIMEOUT_MS = 8000;
-const RETRIES = 2;
+const REQUEST_TIMEOUT_MS = 10000;
+const RETRIES = 4;
+const DETAIL_CONTRATACAO_TIMEOUT_MS = 20000;
+const DETAIL_DOCUMENTOS_TIMEOUT_MS = 30000;
+const DETAIL_RETRIES = 4;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const GEMINI_BATCH_SIZE = 50;
 const GEMINI_TIMEOUT_MS = 45000;
@@ -145,7 +148,7 @@ async function fetchJson(url) {
     try {
       const response = await fetch(url, {
         headers: {
-          Accept: "application/json",
+          Accept: "application/json, */*",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
           Referer: "https://pncp.gov.br/app/editais"
         },
@@ -823,12 +826,68 @@ async function extractDatesFromPdfWithGemini(processo, edital) {
   });
 }
 
+
+async function probePncpDocumentSequences(processo, maxSeq = 20) {
+  const base = buildCompraApiUrl(processo);
+  if (!base) return [];
+  const found = [];
+  let cursor = 1;
+  const concurrency = 5;
+  async function worker() {
+    while (true) {
+      const seq = cursor++;
+      if (seq > maxSeq) return;
+      const url = `${base}/arquivos/${seq}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {
+            Accept: "application/pdf,application/octet-stream,*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+            Referer: "https://pncp.gov.br/app/editais"
+          },
+          signal: controller.signal
+        });
+        if (response.ok) {
+          const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+          const disposition = String(response.headers.get("content-disposition") || "");
+          const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+          let nome = filenameMatch ? decodeURIComponent(filenameMatch[1].replace(/^"|"$/g, "")) : `Documento ${seq}`;
+          if (/json|html/.test(contentType)) {
+            try { await response.body?.cancel(); } catch (_) {}
+            return;
+          }
+          found.push({
+            sequencialDocumento: seq,
+            titulo: nome,
+            nome,
+            tipoDocumentoId: null,
+            tipoDocumentoNome: /pdf/.test(contentType) ? "PDF" : "Documento",
+            dataPublicacaoPncp: null,
+            url
+          });
+        }
+        try { await response.body?.cancel(); } catch (_) {}
+      } catch (_) {
+        // Sequência inexistente, indisponibilidade ou timeout: simplesmente passa ao próximo.
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return found.sort((a, b) => Number(a.sequencialDocumento) - Number(b.sequencialDocumento));
+}
+
 async function fetchPncpDocumentsForEnrichment(processo) {
   const url = buildCompraApiUrl(processo, "/arquivos");
   if (!url) return { docs: [], errors: ["Identificador PNCP incompleto para consulta de documentos."] };
   try {
-    const data = await fetchJson(url);
-    const docs = extractList(data, ["documentos", "arquivos"]).map(doc => ({
+    const data = await fetchJsonWithOptions(url, { timeoutMs: DETAIL_DOCUMENTOS_TIMEOUT_MS, retries: DETAIL_RETRIES });
+    if (data.error) throw new Error(data.error);
+    const docs = extractList(data.data, ["documentos", "arquivos"]).map(doc => ({
       sequencialDocumento: doc?.sequencialDocumento ?? doc?.sequencial_documento ?? null,
       titulo: doc?.titulo || doc?.nome || "Documento",
       nome: doc?.nome || doc?.titulo || "Documento",
@@ -837,8 +896,13 @@ async function fetchPncpDocumentsForEnrichment(processo) {
       dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
       url: doc?.url || doc?.link || null
     })).filter(doc => doc.sequencialDocumento != null || doc.url);
-    return { docs, errors: [] };
+    if (docs.length) return { docs, errors: [] };
+    const probed = await probePncpDocumentSequences(processo, 20);
+    if (probed.length) return { docs: probed, errors: ["A lista de documentos do PNCP veio vazia; documentos recuperados diretamente pelos arquivos individuais."] };
+    return { docs: [], errors: ["O PNCP respondeu sem documentos."] };
   } catch (error) {
+    const probed = await probePncpDocumentSequences(processo, 20);
+    if (probed.length) return { docs: probed, errors: [error.message, "Documentos recuperados diretamente pelos arquivos individuais."] };
     return { docs: [], errors: [error.message] };
   }
 }
@@ -1390,14 +1454,13 @@ app.get("/api/processos/detalhes", async (req, res) => {
     atas: buildCompraApiUrl(processoBase, "/atas")
   };
 
-  // Na abertura do modal buscamos somente o essencial. Itens/histórico/contratos
-  // ficam para uma segunda chamada, evitando sete requisições simultâneas ao PNCP.
-  const [contratacao, documentos] = await Promise.all([
-    fetchJsonWithOptions(urls.contratacao, { timeoutMs: 9000, retries: 2 }),
-    fetchJsonWithOptions(urls.documentos, { timeoutMs: 9000, retries: 2 })
-  ]);
+  // Na abertura do modal buscamos somente o essencial, mas damos mais tempo ao
+  // PNCP para as rotas de contratação e arquivos. Essas duas rotas são justamente
+  // as que alimentam os dados principais e a lista de editais/documentos.
+  const contratacao = await fetchJsonWithOptions(urls.contratacao, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: DETAIL_RETRIES });
+  const documentos = await fetchJsonWithOptions(urls.documentos, { timeoutMs: DETAIL_DOCUMENTOS_TIMEOUT_MS, retries: DETAIL_RETRIES });
 
-  const docs = extractList(documentos.data, ["documentos", "arquivos"]);
+  const docs = extractList(documentos.data, ["documentos", "arquivos", "listaDocumentos", "listaArquivos"]);
   const errors = [];
   if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
   if (documentos.error) errors.push(`documentos: ${documentos.error}`);
@@ -1445,7 +1508,7 @@ app.get("/api/processos/detalhes-extras", async (req, res) => {
       const index = cursor++;
       if (index >= names.length) return;
       const name = names[index];
-      results[name] = await fetchJsonWithOptions(urls[name], { timeoutMs: 7000, retries: 1 });
+      results[name] = await fetchJsonWithOptions(urls[name], { timeoutMs: 15000, retries: 3 });
     }
   }
   await Promise.all([worker(), worker()]);
