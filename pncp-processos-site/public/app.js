@@ -293,7 +293,8 @@ async function openDetails(index, sourceRows = processos) {
     let currentData = data;
     if (data.extrasPendentes) {
       try {
-        const extras = await api(`/api/processos/detalhes-extras?id=${encodeURIComponent(process.controlePncp)}`);
+        const extrasFallback = encodeURIComponent(JSON.stringify(process));
+        const extras = await api(`/api/processos/detalhes-extras?id=${encodeURIComponent(process.controlePncp)}&fallback=${extrasFallback}`);
         currentData = { ...data, ...extras, extrasPendentes: false };
         renderDetails(currentData, process);
       } catch (extraError) {
