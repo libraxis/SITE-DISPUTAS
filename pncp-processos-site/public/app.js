@@ -300,7 +300,7 @@ function renderDetails(data, base) {
             ${doc.url ? `<a class="secondary-link" href="${esc(doc.url)}" target="_blank" rel="noopener">Original</a>` : ""}
           </div>
         </div>
-      `).join("")}</div>` : `<div class="empty-detail">Nenhum documento foi disponibilizado pelo PNCP para esta contratação.</div>`}
+      `).join("")}</div>` : `<div class="empty-detail">Documentos mais pesados ou alto volume de anexos podem sobrecarregar o sistema. AGUARDE, POIS OS DOCUMENTOS IRÃO APARECER.</div>`}
     </section>
 
     <section class="detail-section">
