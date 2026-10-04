@@ -107,9 +107,6 @@ const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 const SITUACAO_DIVULGADA_ID = 1;
 const SITUACAO_DIVULGADA_NOME = "Divulgada no PNCP";
 const cache = new Map();
-// Cache curto dos resultados já encontrados pela busca. Serve apenas como fallback
-// para a tela de detalhes quando a API de detalhe do PNCP estiver indisponível.
-const processoDetalheCache = new Map();
 
 const MODALIDADES = {
   1: "Leilão - Eletrônico",
@@ -1672,7 +1669,55 @@ async function fetchFirstWorkingJson(urls, options = {}) {
 function buildConsultaUrls(pathname, params = {}) {
   const query = new URLSearchParams(params);
   const suffix = query.toString() ? `${pathname}?${query}` : pathname;
-  return PNCP_CONSULTA_BASES.map(base => `${base}${suffix}`);
+  const urls = [];
+  for (const base of PNCP_CONSULTA_BASES) {
+    urls.push(`${base}${suffix}`);
+    // Algumas instalações/rotas do PNCP respondem melhor com a barra final.
+    if (!query.toString() && !suffix.endsWith('/')) urls.push(`${base}${suffix}/`);
+  }
+  return urls;
+}
+
+function processoParaDetalheFallback(processo) {
+  if (!processo) return null;
+  return {
+    numeroControlePNCP: processo.controlePncp,
+    numeroCompra: processo.numero,
+    anoCompra: processo.anoCompra ? Number(processo.anoCompra) : processo.anoCompra,
+    processo: processo.processo,
+    objetoCompra: processo.objeto,
+    informacaoComplementar: processo.complemento,
+    modalidadeNome: processo.modalidade,
+    modalidadeId: processo.modalidadeCodigo,
+    situacaoCompraNome: processo.situacaoCompraNome,
+    situacaoCompraId: processo.situacaoCompraId,
+    tipoInstrumentoConvocatorioNome: processo.tipoInstrumentoConvocatorioNome,
+    modoDisputaNome: processo.modoDisputaNome,
+    modoDisputaId: processo.modoDisputaId,
+    srp: processo.srp,
+    valorTotalEstimado: processo.valor,
+    valorTotalHomologado: processo.valorHomologado,
+    dataAberturaProposta: processo.abertura,
+    dataEncerramentoProposta: processo.encerramento,
+    dataPublicacaoPncp: processo.publicacao,
+    dataInclusao: processo.dataInclusao,
+    dataAtualizacao: processo.dataAtualizacao,
+    orgaoEntidade: {
+      cnpj: processo.cnpjCompra,
+      razaoSocial: processo.orgao,
+      poderId: processo.poderId,
+      esferaId: processo.esferaId
+    },
+    unidadeOrgao: {
+      codigoUnidade: processo.codigoUnidade,
+      nomeUnidade: processo.unidade,
+      municipioNome: processo.municipio,
+      ufSigla: processo.uf,
+      municipioId: processo.municipioId
+    },
+    amparoLegalNome: processo.amparoLegalNome,
+    amparoLegalDescricao: processo.amparoLegalDescricao
+  };
 }
 
 async function fetchConsultaJson(pathname, params = {}, options = {}) {
@@ -1683,19 +1728,19 @@ app.get("/api/processos/detalhes", async (req, res) => {
   const controle = String(req.query.id || "").trim();
   if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
 
-  const processoBase = normalizeProcesso({ numeroControlePNCP: controle });
+  let fallbackProcesso = null;
+  try {
+    const rawFallback = String(req.query.fallback || "").trim();
+    if (rawFallback) fallbackProcesso = JSON.parse(rawFallback);
+  } catch (_) {}
+  const processoBase = normalizeProcesso(fallbackProcesso || { numeroControlePNCP: controle });
   if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
     return res.status(400).json({ error: "Não foi possível identificar CNPJ, ano e sequencial a partir do ID PNCP." });
   }
 
-  // Para leitura de detalhes, priorizamos a API pública de CONSULTA do PNCP.
-  // O mecanismo de busca permanece intocado.
-  const consultaDetalheUrls = buildConsultaUrls(
-    `/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/compras/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`
-  );
   const compraUrls = [
-    ...consultaDetalheUrls,
-    ...buildCompraApiUrls(processoBase)
+    ...buildCompraApiUrls(processoBase),
+    ...buildConsultaUrls(`/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/compras/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`)
   ];
   const urls = {
     contratacao: compraUrls[0] || null,
@@ -1712,34 +1757,30 @@ app.get("/api/processos/detalhes", async (req, res) => {
   // outro host oficial responde normalmente. Por isso o detalhe tenta os hosts
   // oficiais em sequência antes de declarar a contratação indisponível.
   let contratacao = await fetchFirstWorkingJson(compraUrls, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: 2 });
-
-  // Se a API de detalhe estiver temporariamente indisponível, usamos como
-  // fallback os dados do próprio resultado que já foi encontrado na busca.
-  // Isso evita deixar o modal vazio por uma falha 503/timeout do PNCP.
-  let usadoFallbackDaBusca = false;
-  if (!contratacao.data) {
-    const cachedProcesso = processoDetalheCache.get(controle);
-    if (cachedProcesso?.processo) {
-      contratacao = {
-        data: cachedProcesso.processo,
-        error: contratacao.error,
-        url: null,
-        errors: contratacao.errors || []
-      };
-      usadoFallbackDaBusca = true;
-    }
-  }
-
   const documentoResult = await fetchPncpDocumentsForEnrichment(processoBase);
   const embeddedDocs = extractDocumentList(contratacao.data);
   const docs = documentoResult.docs?.length ? documentoResult.docs : embeddedDocs;
   const errors = [];
-  if (usadoFallbackDaBusca) errors.push("API de detalhe do PNCP indisponível no momento; dados básicos recuperados do resultado da busca.");
-  else if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
-  if (documentoResult.errors?.length && !documentoResult.docs?.length) errors.push(...documentoResult.errors.map(e => `documentos: ${e}`));
+  if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
+
+  // Se o PNCP estiver indisponível para a rota de detalhe, não deixamos o
+  // usuário com uma contratação vazia: usamos os dados completos que já
+  // vieram da busca. Isso não altera o mecanismo de busca; apenas permite
+  // abrir o detalhe enquanto a rota específica do PNCP está em 503/falha de rede.
+  let detalheFallback = false;
+  if (!contratacao.data && fallbackProcesso) {
+    contratacao = {
+      data: processoParaDetalheFallback(processoBase),
+      error: contratacao.error,
+      errors: contratacao.errors || []
+    };
+    detalheFallback = true;
+  }
+  if (documentoResult.errors?.length) errors.push(...documentoResult.errors.map(e => `documentos: ${e}`));
 
   res.json({
     ok: Boolean(contratacao.data),
+    detalheFallback,
     id: controle,
     identificacao: { cnpj: processoBase.cnpjCompra, ano: processoBase.anoCompra, sequencial: processoBase.sequencialCompra },
     contratacao: compactDetail(contratacao.data),
@@ -2032,11 +2073,6 @@ app.get("/api/processos", async (req, res) => {
     consulta: diagnostics
   };
 
-  // Guarda somente os processos que a busca já encontrou para permitir que a
-  // tela de detalhes tenha um fallback local se a API individual do PNCP falhar.
-  for (const processo of final) {
-    if (processo?.controlePncp) processoDetalheCache.set(processo.controlePncp, { at: Date.now(), processo });
-  }
   cache.set(key, { at: Date.now(), data });
   res.json(data);
 });
