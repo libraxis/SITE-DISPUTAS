@@ -1838,42 +1838,80 @@ app.get("/api/processos/detalhes", async (req, res) => {
 app.get("/api/processos/detalhes-extras", async (req, res) => {
   const controle = String(req.query.id || "").trim();
   if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
-  const processoBase = normalizeProcesso({ numeroControlePNCP: controle });
-  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
-    return res.status(400).json({ error: "Identificador PNCP inválido." });
-  }
-  const urls = {
-    itens: buildCompraApiUrls(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
-    historico: buildCompraApiUrls(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
-    fontesOrcamentarias: buildCompraApiUrls(processoBase, "/fonte-orcamentaria"),
-    contratos: PNCP_API_BASES.map(base => `${base}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`),
-    atas: buildCompraApiUrls(processoBase, "/atas")
-  };
-  const names = Object.keys(urls);
-  const results = {};
-  let cursor = 0;
-  async function worker() {
-    while (true) {
-      const index = cursor++;
-      if (index >= names.length) return;
-      const name = names[index];
-      results[name] = await fetchFirstWorkingJson(urls[name], { timeoutMs: 15000, retries: 2 });
-    }
-  }
-  await Promise.all([worker(), worker()]);
 
-  const erros = [];
-  for (const [name, result] of Object.entries(results)) if (result.error) erros.push(`${name}: ${result.error}`);
-  res.json({
-    ok: true,
-    itens: extractList(results.itens?.data, ["itens"]),
-    historico: extractList(results.historico?.data, ["listaEventos", "eventos", "historico"]),
-    fontesOrcamentarias: results.fontesOrcamentarias?.data || null,
-    contratos: extractList(results.contratos?.data, ["contratos", "itens", "content"]),
-    atas: extractList(results.atas?.data, ["atas", "content"]),
-    erros,
-    endpoints: urls
-  });
+  // O detalhe já recebe o registro completo da busca. Reaproveitamos esse
+  // fallback aqui também, porque alguns registros chegam ao navegador com
+  // aliases diferentes para o identificador PNCP. Isso afeta somente a tela
+  // de detalhes; a busca permanece exatamente como está.
+  let fallbackProcesso = null;
+  try {
+    const rawFallback = String(req.query.fallback || "").trim();
+    if (rawFallback) fallbackProcesso = JSON.parse(rawFallback);
+  } catch (_) {}
+
+  let processoBase = normalizeProcesso(fallbackProcesso || { numeroControlePNCP: controle });
+  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
+    processoBase = normalizeProcesso({ numeroControlePNCP: controle });
+  }
+  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
+    return res.json({
+      ok: false,
+      itens: [], historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
+      erros: ["Não foi possível identificar CNPJ, ano e sequencial da contratação."],
+      endpoints: {}
+    });
+  }
+
+  try {
+    const urls = {
+      itens: buildCompraApiUrls(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
+      historico: buildCompraApiUrls(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
+      fontesOrcamentarias: buildCompraApiUrls(processoBase, "/fonte-orcamentaria"),
+      contratos: PNCP_API_BASES.map(base => `${base}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`),
+      atas: buildCompraApiUrls(processoBase, "/atas")
+    };
+    const names = Object.keys(urls);
+    const results = {};
+    let cursor = 0;
+    async function worker() {
+      while (true) {
+        const index = cursor++;
+        if (index >= names.length) return;
+        const name = names[index];
+        try {
+          results[name] = await fetchFirstWorkingJson(urls[name], { timeoutMs: 15000, retries: 2 });
+        } catch (error) {
+          results[name] = { data: null, error: error?.message || "Falha ao consultar o PNCP." };
+        }
+      }
+    }
+    await Promise.all([worker(), worker()]);
+
+    const erros = [];
+    for (const [name, result] of Object.entries(results)) {
+      if (result?.error) erros.push(`${name}: ${result.error}`);
+    }
+    res.json({
+      ok: true,
+      itens: extractList(results.itens?.data, ["itens"]),
+      historico: extractList(results.historico?.data, ["listaEventos", "eventos", "historico"]),
+      fontesOrcamentarias: results.fontesOrcamentarias?.data || null,
+      contratos: extractList(results.contratos?.data, ["contratos", "itens", "content"]),
+      atas: extractList(results.atas?.data, ["atas", "content"]),
+      erros,
+      endpoints: urls
+    });
+  } catch (error) {
+    // Nunca derruba a rota de detalhes por falha de uma consulta complementar.
+    // O PNCP pode estar indisponível temporariamente; o modal continua exibindo
+    // os dados principais e informa apenas quais complementos não responderam.
+    res.json({
+      ok: false,
+      itens: [], historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
+      erros: [`Dados complementares: ${error?.message || "Falha ao consultar o PNCP."}`],
+      endpoints: {}
+    });
+  }
 });
 
 function isZipBuffer(buffer) {
