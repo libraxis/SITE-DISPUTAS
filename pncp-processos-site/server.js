@@ -56,6 +56,12 @@ const PNCP_SEARCH_ALTERNATE = "https://www.pncp.gov.br/api/search/";
 // API oficial de consulta, usada como fallback.
 const PNCP_PROPOSTA = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
 const PNCP_PUBLICACAO = "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao";
+const PNCP_CONSULTA_BASES = [
+  "https://pncp.gov.br/api/consulta/v1",
+  "https://www.pncp.gov.br/api/consulta/v1",
+  "https://pncp.gov.br/pncp-api/consulta/v1",
+  "https://www.pncp.gov.br/pncp-api/consulta/v1"
+];
 const PNCP_PORTAL = "https://pncp.gov.br/app/editais";
 const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 const PNCP_API_BASES = [
@@ -419,7 +425,7 @@ function isOpen(processo) {
   return !end || end.getTime() >= Date.now();
 }
 
-function matches(processo, keyword) {
+function matches(processo, keyword, raw = null) {
   const terms = normalizeText(keyword).split(/\s+/).filter(Boolean);
   const text = normalizeText([
     processo.objeto,
@@ -429,7 +435,8 @@ function matches(processo, keyword) {
     processo.orgao,
     processo.unidade,
     processo.municipio,
-    processo.modalidade
+    processo.modalidade,
+    raw ? JSON.stringify(raw) : ""
   ].join(" "));
   return terms.every(term => text.includes(term));
 }
@@ -1359,7 +1366,7 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
   // Inclui os códigos atuais e os códigos legados que ainda aparecem em bases
   // históricas do PNCP.
   const modalidades = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,99,100];
-  const maxPages = 6;
+  const maxPages = 12;
   const tamanhoPagina = 50;
   const stats = [];
   let cursor = 0;
@@ -1377,7 +1384,9 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
       });
       if (uf) params.set("uf", uf);
       try {
-        const data = await fetchJson(`${PNCP_PUBLICACAO}?${params}`);
+        const consulta = await fetchConsultaJson("/contratacoes/publicacao", Object.fromEntries(params.entries()), { timeoutMs: 15000, retries: 2 });
+        if (!consulta.data) throw Object.assign(new Error(consulta.error || "Falha no PNCP"), { status: 503 });
+        const data = consulta.data;
         const items = getArray(data);
         st.paginas++;
         st.registros += items.length;
@@ -1407,6 +1416,7 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
           arr.push(processo);
         }
         if (!items.length || items.length < tamanhoPagina) break;
+        await new Promise(resolve => setTimeout(resolve, 500));
       } catch (error) {
         st.erros++;
         // Um código de modalidade indisponível não deve matar o fallback inteiro.
@@ -1424,7 +1434,7 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
       results[i] = await scan(modalidades[i]);
     }
   }
-  await Promise.all(Array.from({ length: 6 }, worker));
+  await Promise.all(Array.from({ length: 1 }, worker));
 
   const byId = new Map();
   for (const r of results) {
@@ -1480,7 +1490,9 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
         tamanhoPagina: String(tamanhoPagina)
       });
       if (uf) params.set("uf", uf);
-      const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
+      const consulta = await fetchConsultaJson("/contratacoes/proposta", Object.fromEntries(params.entries()), { timeoutMs: 15000, retries: 2 });
+      if (!consulta.data) throw Object.assign(new Error(consulta.error || "Falha no PNCP"), { status: 503 });
+      const data = consulta.data;
       const items = getArray(data);
       local.paginas++;
       local.registros += items.length;
@@ -1490,7 +1502,7 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
           rejectedUf++;
           continue;
         }
-        let isMatch = matches(processo, keyword);
+        let isMatch = matches(processo, keyword, raw);
         if (!isMatch && processo.cnpjCompra && processo.anoCompra && processo.sequencialCompra) {
           try {
             const detail = await fetchJson(buildCompraApiUrl(processo));
@@ -1654,6 +1666,16 @@ async function fetchFirstWorkingJson(urls, options = {}) {
   return { data: null, error: errors[errors.length - 1] || "Nenhuma URL disponível.", errors };
 }
 
+function buildConsultaUrls(pathname, params = {}) {
+  const query = new URLSearchParams(params);
+  const suffix = query.toString() ? `${pathname}?${query}` : pathname;
+  return PNCP_CONSULTA_BASES.map(base => `${base}${suffix}`);
+}
+
+async function fetchConsultaJson(pathname, params = {}, options = {}) {
+  return fetchFirstWorkingJson(buildConsultaUrls(pathname, params), options);
+}
+
 app.get("/api/processos/detalhes", async (req, res) => {
   const controle = String(req.query.id || "").trim();
   if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
@@ -1663,7 +1685,10 @@ app.get("/api/processos/detalhes", async (req, res) => {
     return res.status(400).json({ error: "Não foi possível identificar CNPJ, ano e sequencial a partir do ID PNCP." });
   }
 
-  const compraUrls = buildCompraApiUrls(processoBase);
+  const compraUrls = [
+    ...buildCompraApiUrls(processoBase),
+    ...buildConsultaUrls(`/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/compras/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`)
+  ];
   const urls = {
     contratacao: compraUrls[0] || null,
     contratacaoAlternativas: compraUrls,
@@ -1713,13 +1738,12 @@ app.get("/api/processos/detalhes-extras", async (req, res) => {
   if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
     return res.status(400).json({ error: "Identificador PNCP inválido." });
   }
-  const base = buildCompraApiUrl(processoBase);
   const urls = {
-    itens: buildCompraApiUrl(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
-    historico: buildCompraApiUrl(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
-    fontesOrcamentarias: buildCompraApiUrl(processoBase, "/fonte-orcamentaria"),
-    contratos: `${PNCP_API_BASE}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`,
-    atas: buildCompraApiUrl(processoBase, "/atas")
+    itens: buildCompraApiUrls(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
+    historico: buildCompraApiUrls(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
+    fontesOrcamentarias: buildCompraApiUrls(processoBase, "/fonte-orcamentaria"),
+    contratos: PNCP_API_BASES.map(base => `${base}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`),
+    atas: buildCompraApiUrls(processoBase, "/atas")
   };
   const names = Object.keys(urls);
   const results = {};
@@ -1729,7 +1753,7 @@ app.get("/api/processos/detalhes-extras", async (req, res) => {
       const index = cursor++;
       if (index >= names.length) return;
       const name = names[index];
-      results[name] = await fetchJsonWithOptions(urls[name], { timeoutMs: 15000, retries: 3 });
+      results[name] = await fetchFirstWorkingJson(urls[name], { timeoutMs: 15000, retries: 2 });
     }
   }
   await Promise.all([worker(), worker()]);
