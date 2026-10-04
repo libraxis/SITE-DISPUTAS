@@ -2576,7 +2576,7 @@ app.get("/api/processos", async (req, res) => {
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
-    service: "ST Processos",
+    service: "STZ Licita Master - Painel",
     pncpSearch: PNCP_SEARCH,
     pncpProposta: PNCP_PROPOSTA,
     time: new Date().toISOString(),
@@ -2592,5 +2592,5 @@ app.get("/api/pncp-url", (req, res) => {
 
 app.get("/{*splat}", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-app.listen(PORT, () => console.log(`ST Processos ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`STZ Licita Master - Painel ativo na porta ${PORT}`));
 
