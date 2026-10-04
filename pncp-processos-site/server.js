@@ -326,7 +326,7 @@ function normalizeProcesso(item, modalidadeFallback = null) {
     "numeroControlePncp",
     "idContratacaoPNCP",
     "id_contratacao_pncp"
-  ) || "");
+  ) || "").trim();
 
   const cnpj = String(pick(
     item,
@@ -338,11 +338,17 @@ function normalizeProcesso(item, modalidadeFallback = null) {
   let ano = String(pick(item, "anoCompra", "ano", "ano_compra") || "");
   let seq = String(pick(item, "sequencialCompra", "sequencial", "sequencial_compra") || "");
   let parsedCnpj = cnpj;
-  const controleMatch = controle.match(/^(.+?)-1-(\d+)\/(\d{4})$/);
+
+  // O identificador PNCP tem o formato CNPJ-modalidade-sequencial/ano.
+  // Não devemos assumir que a modalidade seja sempre 1: há contratações com
+  // diferentes códigos de modalidade. Este parser é usado somente para
+  // reconstruir a identificação nas telas de detalhes/documentos.
+  const controleNormalizado = controle.replace(/\\\//g, "/");
+  const controleMatch = controleNormalizado.match(/^(\d{14})-(\d+)-(\d+)\/(\d{4})$/);
   if (controleMatch) {
     parsedCnpj = parsedCnpj || controleMatch[1];
-    seq = seq || controleMatch[2];
-    ano = ano || controleMatch[3];
+    seq = seq || controleMatch[3];
+    ano = ano || controleMatch[4];
   }
 
   let link = item?.item_url || item?.url || item?.link || "";
@@ -1733,7 +1739,12 @@ app.get("/api/processos/detalhes", async (req, res) => {
     const rawFallback = String(req.query.fallback || "").trim();
     if (rawFallback) fallbackProcesso = JSON.parse(rawFallback);
   } catch (_) {}
-  const processoBase = normalizeProcesso(fallbackProcesso || { numeroControlePNCP: controle });
+  let processoBase = normalizeProcesso(fallbackProcesso || { numeroControlePNCP: controle });
+  // Para documentos, o ID PNCP é suficiente. Reconstituímos a identificação
+  // diretamente do ID caso o objeto enviado pelo navegador esteja incompleto.
+  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
+    processoBase = normalizeProcesso({ numeroControlePNCP: controle });
+  }
   if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
     return res.status(400).json({ error: "Não foi possível identificar CNPJ, ano e sequencial a partir do ID PNCP." });
   }
