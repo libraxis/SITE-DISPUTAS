@@ -376,6 +376,12 @@ function normalizeProcesso(item, modalidadeFallback = null) {
     ano = ano || controleMatch[4];
   }
 
+  // O identificador exibido pelo PNCP pode trazer zeros à esquerda no
+  // sequencial (ex.: 000080), mas as APIs /compras/{ano}/{sequencial}
+  // trabalham com o número canônico (80). Sem esta normalização algumas
+  // contratações retornam HTTP 500/404 mesmo existindo no portal.
+  if (/^\d+$/.test(seq)) seq = String(Number(seq));
+
   let link = item?.item_url || item?.url || item?.link || "";
   if (link && link.startsWith("/")) {
     link = link.replace(/^\/compras/, "");
@@ -1778,7 +1784,59 @@ async function fetchDetailJson(urls, { timeoutMs = 12000 } = {}) {
 }
 
 function extractDetailItems(data) {
-  return extractList(data, ["itens", "itensCompra", "listaItens", "content"]);
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+
+  const candidates = [
+    data.itens,
+    data.itensCompra,
+    data.listaItens,
+    data.listaItensCompra,
+    data.items,
+    data.content,
+    data.resultados,
+    data.results,
+    data.data?.itens,
+    data.data?.itensCompra,
+    data.data?.listaItens,
+    data.data?.content,
+    data.data?.results
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
+}
+
+// Respostas de arquivos do PNCP variam entre versões da API: algumas usam
+// `arquivos`, outras `documentos`, `content`, `data` ou retornam a lista
+// diretamente. Esta função normaliza todos esses formatos para a interface.
+function extractDocumentList(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+
+  const candidates = [
+    data.arquivos,
+    data.documentos,
+    data.listaDocumentos,
+    data.listaArquivos,
+    data.content,
+    data.items,
+    data.results,
+    data.resultados,
+    data.data?.arquivos,
+    data.data?.documentos,
+    data.data?.listaDocumentos,
+    data.data?.listaArquivos,
+    data.data?.content,
+    data.data?.items,
+    data.data?.results
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
 }
 
 function buildConsultaUrls(pathname, params = {}) {
@@ -1866,7 +1924,7 @@ app.get("/api/processos/detalhes", async (req, res) => {
     contratacao: compraUrls[0] || null,
     contratacaoAlternativas: compraUrls,
     documentos: buildFileApiUrls(processoBase, "/arquivos", "list")[0] || buildCompraApiUrl(processoBase, "/arquivos"),
-    itens: buildCompraApiUrl(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
+    itens: buildCompraApiUrl(processoBase, "/itens"),
     historico: buildCompraApiUrl(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
     fontesOrcamentarias: buildCompraApiUrl(processoBase, "/fonte-orcamentaria"),
     contratos: `${PNCP_API_BASE}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`,
@@ -1949,7 +2007,7 @@ app.get("/api/processos/detalhes-extras", async (req, res) => {
 
   try {
     const urls = {
-      itens: buildCompraApiUrls(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
+      itens: buildCompraApiUrls(processoBase, "/itens"),
       historico: buildCompraApiUrls(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
       fontesOrcamentarias: buildCompraApiUrls(processoBase, "/fonte-orcamentaria"),
       contratos: PNCP_API_BASES.map(base => `${base}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`),
