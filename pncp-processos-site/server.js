@@ -485,28 +485,78 @@ async function filterWithGemini(keyword, processos, diagnostics) {
     return processos;
   }
 
+  // A busca precisa devolver resultados mesmo quando o serviço de IA estiver
+  // lento ou indisponível. A versão anterior processava lotes de 50
+  // sequencialmente; com 1.000 candidatos isso poderia bloquear a pesquisa por
+  // muitos minutos (20 chamadas de até 45s). Agora usamos lotes concorrentes,
+  // limite de tempo global e fallback automático para os resultados do PNCP.
+  const MAX_AI_CANDIDATES = 250;
+  const AI_BATCH_SIZE = 50;
+  const AI_CONCURRENCY = 4;
+  const AI_TIMEOUT_MS = 25000;
+
+  const batchSource = processos.slice(0, MAX_AI_CANDIDATES);
+  const batches = [];
+  for (let start = 0; start < batchSource.length; start += AI_BATCH_SIZE) {
+    batches.push(batchSource.slice(start, start + AI_BATCH_SIZE));
+  }
+  diagnostics.ai.lotes = batches.length;
+
+  const classify = async (batch) => {
+    const work = classifyBatchWithGemini(keyword, batch);
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout do filtro Gemini")), AI_TIMEOUT_MS));
+    return Promise.race([work, timeout]);
+  };
+
   const kept = [];
-  for (let start = 0; start < processos.length; start += GEMINI_BATCH_SIZE) {
-    const batch = processos.slice(start, start + GEMINI_BATCH_SIZE);
-    diagnostics.ai.lotes++;
-    try {
-      const indices = await classifyBatchWithGemini(keyword, batch);
-      for (const index of indices) kept.push(batch[index]);
-    } catch (error) {
-      diagnostics.ai.erros.push(error.message);
+  let cursor = 0;
+  let failed = false;
+  async function worker() {
+    while (!failed) {
+      const index = cursor++;
+      if (index >= batches.length) return;
+      try {
+        const indices = await classify(batches[index]);
+        for (const localIndex of indices) kept.push({ batchIndex: index, localIndex });
+      } catch (error) {
+        failed = true;
+        diagnostics.ai.erros.push(error.message);
+        return;
+      }
     }
   }
 
-  if (diagnostics.ai.erros.length) {
-    diagnostics.ai.status = "erro";
-    diagnostics.warnings.push(`Filtro Gemini: ${diagnostics.ai.erros.join(" | ")}`);
+  await Promise.all(Array.from({ length: Math.min(AI_CONCURRENCY, batches.length) }, worker));
+
+  if (failed) {
+    diagnostics.ai.status = "fallback_pncp";
+    diagnostics.warnings.push(`Filtro Gemini indisponível/lento; resultados do PNCP foram mantidos. ${diagnostics.ai.erros.join(" | ")}`);
+    diagnostics.ai.mantidos = processos.length;
+    diagnostics.ai.removidos = 0;
     return processos;
   }
 
+  // Se a IA processou apenas uma parte dos candidatos, preservamos os demais
+  // em vez de descartá-los silenciosamente. Isso garante que uma busca ampla
+  // nunca fique vazia por causa de um limite interno do filtro.
+  const selected = new Set();
+  for (const item of kept) {
+    const batchStart = item.batchIndex * AI_BATCH_SIZE;
+    selected.add(batchStart + item.localIndex);
+  }
+
+  const result = processos.map((processo, index) => {
+    if (index >= batchSource.length) return processo;
+    return selected.has(index) ? processo : null;
+  }).filter(Boolean);
+
   diagnostics.ai.status = "ok";
-  diagnostics.ai.mantidos = kept.length;
-  diagnostics.ai.removidos = Math.max(0, processos.length - kept.length);
-  return kept;
+  diagnostics.ai.mantidos = result.length;
+  diagnostics.ai.removidos = Math.max(0, processos.length - result.length);
+  if (processos.length > MAX_AI_CANDIDATES) {
+    diagnostics.warnings.push(`O filtro Gemini analisou os primeiros ${MAX_AI_CANDIDATES} candidatos; os demais foram preservados para evitar atraso na pesquisa.`);
+  }
+  return result;
 }
 
 function isValidDateParts(year, month, day, hour = 0, minute = 0) {
@@ -1521,7 +1571,9 @@ app.get("/api/processos", async (req, res) => {
   let primaryError = null;
 
   try {
-    processos = await searchPortalApi(uf, keyword, diagnostics);
+    const searchWork = searchPortalApi(uf, keyword, diagnostics);
+    const searchTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Tempo limite da consulta ao PNCP excedido.")), 90000));
+    processos = await Promise.race([searchWork, searchTimeout]);
   } catch (error) {
     primaryError = error;
     diagnostics.primary = { erro: error.message, status: error.status || null };
