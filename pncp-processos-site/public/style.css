@@ -320,3 +320,102 @@ body.app-locked > .sidebar, body.app-locked > .main, body.app-locked > #horizont
   .nav { font-size: 12px; }
   .credential-password-row { grid-template-columns: 1fr; }
 }
+
+
+/* STZ Licita Master - tema escuro grafite + roxo */
+:root {
+  --bg: #111114;
+  --card: #1a1a20;
+  --text: #f1eff7;
+  --muted: #9a96a8;
+  --line: #302d3a;
+  --primary: #8b5cf6;
+  --primary2: #7042d6;
+  --shadow: 0 12px 35px rgba(0,0,0,.28);
+  --purple-soft: #a78bfa;
+  --purple-dark: #24183b;
+}
+html { background: var(--bg); }
+body { background: radial-gradient(circle at 80% -10%, rgba(139,92,246,.10), transparent 32%), var(--bg); color: var(--text); }
+.sidebar { background: #0d0d11; border-right: 1px solid #27232f; box-shadow: 8px 0 30px rgba(0,0,0,.18); }
+.brand strong, .login-brand strong { color: #fff; }
+.brand small, .login-brand small { color: #8f899e; }
+.logo { background: linear-gradient(135deg,#7c3aed,#9b72ff); box-shadow: 0 7px 20px rgba(124,58,237,.25); }
+.nav { color: #aaa5b5; }
+.nav:hover, .nav.active { background: #251a39; color: #f5f1ff; box-shadow: inset 3px 0 0 #9b72ff; }
+.auth-user { border-color: #332947; background: #17131f; color: #d9d2e8; }
+.auth-user strong { color: #fff; }
+.sidebar-logout { border-color: #302a39; color: #aaa5b5; }
+.sidebar-logout:hover { background: #21182f; color: #fff; }
+.auth-badge.online { background: #18271f; color: #82e6ae; border: 1px solid #284534; }
+.main { background: transparent; }
+.eyebrow { color: #a78bfa; }
+.topbar h1, .card-head h3, .supplier-hero h3 { color: #f5f2fa; }
+.muted, .refresh-status { color: #9a96a8; }
+.card, .stat { background: linear-gradient(145deg,#1c1c22,#18181d); border-color: #302d3a; box-shadow: var(--shadow); }
+.primary { background: linear-gradient(135deg,#8b5cf6,#7442d9); border-color: #8b5cf6; box-shadow: 0 8px 20px rgba(124,58,237,.18); }
+.primary:hover { background: linear-gradient(135deg,#9a6bff,#8150eb); }
+.ghost { background: #201d26; border-color: #36313f; color: #ddd7e7; }
+.ghost:hover { background: #292333; border-color: #5b4a73; }
+input, select, textarea { background: #121216; border-color: #36323e; color: #f0edf5; }
+input::placeholder, textarea::placeholder { color: #6f6a79; }
+input:focus, select:focus, textarea:focus { border-color: #8b5cf6; box-shadow: 0 0 0 3px rgba(139,92,246,.14); }
+.card label, .admin-form label, .credential-details-form label { color: #bcb6c8; }
+.supplier-source { color: #898493; }
+.table-wrap th, .table-wrap td, .admin-table th, .admin-table td { border-color: #302d3a; }
+.table-wrap th, .admin-table th { background: #17171c; color: #918b9d; }
+.table-wrap td, .admin-table td { color: #ddd9e4; }
+.table-wrap tr:hover td, .admin-table tr:hover td { background: rgba(139,92,246,.045); }
+.empty { color: #888293; }
+.notice { background: #211b2d; color: #c9bfd8; border: 1px solid #3b2c50; }
+.status-pill { background: #182b23; color: #7ee4ab !important; border: 1px solid #28523d; }
+.details-btn { background: linear-gradient(135deg,#8b5cf6,#7042d6); }
+.secondary-link { color: #a78bfa; }
+.secondary-link:hover { color: #c4b5fd; }
+.diag-grid>div { border-color: #393443; background: #17171d; }
+.diag-grid span { color: #9993a5; }
+.diag-grid strong { color: #c4b5fd; }
+#diagnostics details { border-color: #332f3a; }
+#diagnostics summary { color: #c4b5fd; }
+#diagDetails { background: #0c0c10; color: #ddd7e7; border: 1px solid #302b39; }
+.detail-loading-inline { background: #211d27; color: #a49daf; }
+.modal { background: rgba(3,3,6,.78); }
+.modal-panel { background: #19191f; border: 1px solid #35313d; box-shadow: 0 25px 90px rgba(0,0,0,.55); }
+.modal-header { background: #1d1c23; border-color: #35313d; }
+.modal-header h2 { color: #f4f1f8; }
+.close-modal { background: #2a2631; color: #ddd7e7; }
+.close-modal:hover { background: #382e47; color: #fff; }
+.detail-hero { background: #201b2a; border-color: #3a3048; }
+.detail-section { border-color: #302d3a; }
+.detail-field, .long-field { background: #17171c; border-color: #302d3a; }
+.detail-field span, .long-field span { color: #958ea0; }
+.detail-field strong, .long-field p { color: #ddd9e4; }
+.sub-block, .empty-detail { background: #211e26; color: #aaa3b3; }
+.section-count { background: #2b2040; color: #c4b5fd; }
+.document-row, .history-row, .items-table-wrap { border-color: #302d3a; }
+.document-icon { background: #28232f; color: #aaa3b3; }
+.document-info strong { color: #e7e2ed; }
+.document-info small, .history-row small, .history-date { color: #908999; }
+.items-table th { background: #17171c; color: #958ea0; }
+.items-table th, .items-table td { border-color: #302d3a; }
+.items-table td { color: #ddd9e4; }
+.warning-section { background: #2b2117; border-color: #60451f; }
+.raw-box, .related-list pre, .raw-details pre { background: #0d0d11; color: #ddd7e7; border: 1px solid #302d3a; }
+.spinner { border-color: #332e3b; border-top-color: #9b72ff; }
+.maintenance-card { background: #17171c; border-color: #302d3a; }
+.switch span { background: #393541; }
+.switch input:checked + span { background: #8b5cf6; }
+.danger-btn { background: #2a191c; border-color: #5a2c31; color: #ff9caa; }
+.danger-btn:hover { background: #371d22; }
+.login-screen { background: radial-gradient(circle at 50% 0%, rgba(139,92,246,.22), transparent 38%), linear-gradient(135deg,#09090c,#17131f); }
+.login-card { background: #19191f; border-color: #35313d; box-shadow: 0 25px 90px rgba(0,0,0,.55); }
+.login-card h1 { color: #f5f2fa; }
+.login-form label { color: #bcb6c8; }
+.login-form input, .admin-form input { background: #111115; border-color: #37333f; color: #f0edf5; }
+.login-message { background: #2a191c; color: #ffadb7; border-color: #5a2c31; }
+#horizontalScrollProxy { background: rgba(17,17,20,.96); border-color: #302d3a; }
+.toast { background: #24202c !important; border: 1px solid #49375e; color: #f1ecf7; }
+
+@media (max-width: 900px) {
+  .sidebar { border-right: 0; border-bottom: 1px solid #27232f; }
+}

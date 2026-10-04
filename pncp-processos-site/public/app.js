@@ -37,7 +37,7 @@ function switchView(view) {
   const target = document.getElementById(`${view}View`);
   if (target) target.classList.remove("hidden");
   document.querySelectorAll(".nav").forEach(el => el.classList.toggle("active", el.dataset.view === view));
-  const title = { buscar: "Buscar processos", credenciais: "Administrar credenciais", manutencao: "Configurações / manutenção" }[view] || "ST Processos";
+  const title = { buscar: "Buscar processos", credenciais: "Administrar credenciais", manutencao: "Configurações / manutenção" }[view] || "STZ Licita Master - Painel";
   const h1 = document.querySelector(".topbar h1"); if (h1) h1.textContent = title;
   if (view === "credenciais") loadCredentials();
   if (view === "manutencao") loadMaintenancePanel();
@@ -177,9 +177,14 @@ function setupDiagnosticsToggle(){
 }
 
 function renderDiagnostics(data) {
-  setupDiagnosticsToggle();
   const box = $("#diagnostics");
   if (!box) return;
+  // Informações de diagnóstico são internas e ficam disponíveis somente para administradores.
+  if (currentUser?.role !== "admin") {
+    box.classList.add("hidden");
+    return;
+  }
+  setupDiagnosticsToggle();
   const c = data?.consulta || {};
   $("#diagResponse").textContent = data?.warnings?.length ? "COM AVISOS/ERROS" : "OK";
   $("#diagRaw").textContent = Number(c.rawTotal ?? 0).toLocaleString("pt-BR");
@@ -328,9 +333,9 @@ function renderDetails(data, base) {
       `).join("")}</div>` : `<div class="empty-detail">Nenhum evento de histórico retornado.</div>`}
     </section>
 
-    ${data.erros?.length ? `<section class="detail-section warning-section"><h4>Itens que o PNCP não retornou</h4><ul>${data.erros.map(error => `<li>${esc(error)}</li>`).join("")}</ul></section>` : ""}
+    ${currentUser?.role === "admin" && data.erros?.length ? `<section class="detail-section warning-section"><h4>Itens que o PNCP não retornou</h4><ul>${data.erros.map(error => `<li>${esc(error)}</li>`).join("")}</ul></section>` : ""}
 
-    <details class="raw-details"><summary>Dados completos retornados pela API</summary><pre>${esc(JSON.stringify(data, null, 2))}</pre></details>
+    ${currentUser?.role === "admin" ? `<details class="raw-details"><summary>Dados completos retornados pela API</summary><pre>${esc(JSON.stringify(data, null, 2))}</pre></details>` : ""}
   `;
 }
 
