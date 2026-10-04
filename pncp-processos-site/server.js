@@ -1371,17 +1371,59 @@ async function searchPortalApi(uf, keyword, diagnostics) {
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
-  diagnostics.primary = {
-    endpoint: PNCP_SEARCH,
-    statusFiltro: "recebendo_proposta",
-    paginasLidas: pagesRead,
-    totalInformadoPeloPNCP: total,
-    registrosRecebidos: rawRecords,
-    encontrados: found.length,
-    limitePaginas: SEARCH_MAX_PAGES,
-    truncado: Boolean(total && pagesRead * SEARCH_PAGE_SIZE < total)
-  };
+  // Alguns momentos do índice /api/search aceitam a pesquisa com `ufs=PR`,
+  // mas retornam zero quando o filtro de UF é aplicado diretamente. Isso faz
+  // com que uma pesquisa iniciada já com PR pareça vazia, enquanto a mesma
+  // pesquisa iniciada em "Todas as UFs" encontra os registros.
+  //
+  // Neste caso específico, preservamos a busca textual exatamente como está e
+  // fazemos uma segunda tentativa sem o parâmetro de UF, aplicando a UF somente
+  // sobre os registros efetivamente retornados pelo PNCP. Assim, o filtro PR não
+  // depende do comportamento instável do parâmetro `ufs` do índice.
+  if (uf && found.length === 0) {
+    const broadFound = [];
+    let broadPages = 0;
+    let broadRaw = 0;
+    let broadTotal = 0;
 
+    for (let pagina = 1; pagina <= SEARCH_MAX_PAGES; pagina++) {
+      const params = new URLSearchParams({
+        tipos_documento: "edital",
+        q: keyword,
+        ordenacao: "-data",
+        status: "recebendo_proposta",
+        pagina: String(pagina),
+        tam_pagina: String(SEARCH_PAGE_SIZE)
+      });
+
+      const url = `${PNCP_SEARCH}?${params}`;
+      const data = await fetchJson(url);
+      const items = getArray(data);
+      broadTotal = getTotal(data) || broadTotal;
+      broadPages++;
+      broadRaw += items.length;
+
+      for (const raw of items) {
+        const processo = normalizeProcesso(raw);
+        if (isDivulgada(processo) && isOpen(processo) && sameUf(processo.uf, uf) && matches(processo, keyword)) {
+          broadFound.push(processo);
+        }
+      }
+
+      if (!items.length || items.length < SEARCH_PAGE_SIZE || (broadTotal && pagina * SEARCH_PAGE_SIZE >= broadTotal)) break;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    found.push(...broadFound);
+    diagnostics.primary.fallbackSemUf = {
+      executado: true,
+      paginasLidas: broadPages,
+      registrosRecebidos: broadRaw,
+      encontradosPorUf: broadFound.length
+    };
+  }
+
+  diagnostics.primary.encontrados = found.length;
   return found;
 }
 
