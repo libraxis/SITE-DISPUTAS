@@ -23,7 +23,10 @@ async function api(url, options = {}) {
   });
   let data = {};
   try { data = await response.json(); } catch (_) {}
-  if (!response.ok) throw new Error(data.error || "Não foi possível consultar o servidor.");
+  if (!response.ok) {
+    const detail = data.error || data.message || `HTTP ${response.status}`;
+    throw new Error(`Falha ao consultar os detalhes: ${detail}`);
+  }
   return data;
 }
 
@@ -307,6 +310,23 @@ async function openDetails(index, sourceRows = processos) {
         currentData = { ...data, extrasPendentes: false, erros: [...(data.erros || []), `Dados complementares: ${extraError.message}`] };
         renderDetails(currentData, process);
       }
+    }
+
+    // Documentos são uma etapa independente: se a listagem de arquivos falhar,
+    // isso não derruba os itens, datas ou informações principais.
+    try {
+      const docsFallback = encodeURIComponent(JSON.stringify(process));
+      const docsData = await api(`/api/processos/detalhes-documentos?id=${encodeURIComponent(process.controlePncp)}&fallback=${docsFallback}`);
+      if (Array.isArray(docsData.documentos) && docsData.documentos.length) {
+        currentData = { ...currentData, documentos: docsData.documentos };
+        renderDetails(currentData, process);
+      } else if (docsData.erros?.length) {
+        currentData = { ...currentData, erros: [...(currentData.erros || []), ...docsData.erros] };
+        renderDetails(currentData, process);
+      }
+    } catch (docsError) {
+      currentData = { ...currentData, erros: [...(currentData.erros || []), `Documentos: ${docsError.message}`] };
+      renderDetails(currentData, process);
     }
 
     // Se o PNCP não trouxe as datas diretamente na contratação, agora que o
