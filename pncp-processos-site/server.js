@@ -59,9 +59,9 @@ const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 
 const CACHE_MS = 2 * 60 * 1000;
 const SEARCH_PAGE_SIZE = 50;
-const SEARCH_MAX_PAGES = 20;
-const REQUEST_TIMEOUT_MS = 15000;
-const RETRIES = 4;
+const SEARCH_MAX_PAGES = 5;
+const REQUEST_TIMEOUT_MS = 8000;
+const RETRIES = 2;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const GEMINI_BATCH_SIZE = 50;
 const GEMINI_TIMEOUT_MS = 45000;
@@ -1230,7 +1230,7 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
   // perder contratações de outras modalidades e, em alguns momentos, retornar 0.
   // Aqui consultamos a fila geral de propostas abertas, filtrando UF e termo no
   // próprio aplicativo. Isso segue a definição oficial do endpoint de propostas.
-  const maxPages = 20;
+  const maxPages = 3;
   const tamanhoPagina = 50;
 
   for (let pagina = 1; pagina <= maxPages; pagina++) {
@@ -1581,7 +1581,7 @@ app.get("/api/processos", async (req, res) => {
   }
 
   // Se a busca textual do próprio portal falhar ou vier vazia, usa a API /proposta.
-  if (primaryError || processos.length === 0) {
+  if (primaryError) {
     try {
       const fallback = await fallbackPropostaApi(uf, keyword, diagnostics);
       processos.push(...fallback);
@@ -1608,13 +1608,22 @@ app.get("/api/processos", async (req, res) => {
   }
 
   const beforeAi = processos.length;
-  processos = await filterWithGemini(keyword, processos, diagnostics);
+  // IMPORTANTE: o filtro Gemini NÃO participa mais do caminho crítico da busca.
+  // A busca precisa mostrar os resultados do PNCP imediatamente; uma chamada de IA
+  // lenta ou indisponível nunca pode deixar a tela presa em "Carregando".
   diagnostics.candidatosAntesIA = beforeAi;
   diagnostics.candidatosDepoisIA = processos.length;
+  diagnostics.ai = {
+    enabled: GEMINI_ENABLED,
+    status: "nao_bloqueante",
+    candidatosAntes: beforeAi,
+    candidatosDepois: processos.length,
+    mensagem: "Filtro Gemini não bloqueia a exibição dos resultados."
+  };
 
-  // Os resultados são devolvidos imediatamente. A leitura dos editais ocorre em segundo plano
-  // pelo endpoint /api/processos/enriquecer, evitando que um edital/PDF/IA lento impeça a tabela de aparecer.
-  diagnostics.enriquecimento = { status: "em_segundo_plano", candidatos: processos.length };
+  // As datas/PDFs/detalhes continuam fora da busca. Eles só são consultados quando
+  // o usuário abre "Detalhes".
+  diagnostics.enriquecimento = { status: "sob_demanda", candidatos: processos.length };
 
   const unique = new Map();
   for (const processo of processos) {
