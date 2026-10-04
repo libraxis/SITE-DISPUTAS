@@ -61,10 +61,20 @@ const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 // O portal público também expõe a camada de arquivos por /pncp-api/v1.
 // Em períodos de instabilidade, /api/pncp pode retornar 503 enquanto esta
 // rota continua entregando os arquivos publicados.
-const PNCP_FILE_API_BASES = [
+const PNCP_FILE_LIST_BASES = [
+  // Lista de documentos: rota documentada para consulta da contratação.
+  "https://pncp.gov.br/api/pncp/v1",
   "https://pncp.gov.br/pncp-api/v1",
+  "https://www.pncp.gov.br/api/pncp/v1",
+  "https://www.pncp.gov.br/pncp-api/v1"
+];
+const PNCP_FILE_DOWNLOAD_BASES = [
+  // Download do conteúdo: esta camada é a que o portal público usa para
+  // entregar o arquivo binário do documento.
+  "https://pncp.gov.br/pncp-api/v1",
+  "https://pncp.gov.br/api/pncp/v1",
   "https://www.pncp.gov.br/pncp-api/v1",
-  "https://pncp.gov.br/api/pncp/v1"
+  "https://www.pncp.gov.br/api/pncp/v1"
 ];
 
 const CACHE_MS = 2 * 60 * 1000;
@@ -910,25 +920,24 @@ async function probePncpDocumentSequences(processo, maxSeq = 20) {
 }
 
 async function fetchPncpDocumentsForEnrichment(processo) {
-  const urls = buildFileApiUrls(processo, "/arquivos");
+  const urls = buildFileApiUrls(processo, "/arquivos", "list");
   if (!urls.length) return { docs: [], errors: ["Identificador PNCP incompleto para consulta de documentos."] };
   const errors = [];
 
+  // Primeiro tenta a listagem oficial. Alguns nós antigos aceitam também
+  // pagina/tamanhoPagina; testamos as duas formas sem depender de uma delas.
+  const listUrls = [...new Set(urls.flatMap(url => [
+    url,
+    `${url}?pagina=1&tamanhoPagina=500`
+  ]))];
+
   // Primeiro tenta a listagem oficial. O manual do PNCP define esta rota como
   // a consulta de todos os documentos da contratação.
-  for (const url of urls) {
+  for (const url of listUrls) {
     try {
-      const data = await fetchJsonWithOptions(url, { timeoutMs: 12000, retries: 2 });
+      const data = await fetchJsonWithOptions(url, { timeoutMs: 12000, retries: 3 });
       if (data.error) { errors.push(`${url}: ${data.error}`); continue; }
-      const docs = extractList(data.data, ["documentos", "arquivos", "listaDocumentos", "listaArquivos"]).map(doc => ({
-        sequencialDocumento: doc?.sequencialDocumento ?? doc?.sequencial_documento ?? null,
-        titulo: doc?.titulo || doc?.nome || "Documento",
-        nome: doc?.nome || doc?.titulo || "Documento",
-        tipoDocumentoId: doc?.tipoDocumentoId ?? doc?.tipo_documento_id ?? null,
-        tipoDocumentoNome: doc?.tipoDocumentoNome || doc?.tipo_documento_nome || "Documento",
-        dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
-        url: doc?.url || doc?.link || null
-      })).filter(doc => doc.sequencialDocumento != null || doc.url);
+      const docs = extractDocumentList(data.data);
       if (docs.length) return { docs, errors };
     } catch (error) {
       errors.push(`${url}: ${error.message}`);
@@ -1560,12 +1569,13 @@ function buildCompraApiUrl(processo, suffix = "") {
   return `${PNCP_API_BASE}/v1/orgaos/${encodeURIComponent(cnpj)}/compras/${encodeURIComponent(ano)}/${encodeURIComponent(seq)}${suffix}`;
 }
 
-function buildFileApiUrls(processo, suffix = "") {
+function buildFileApiUrls(processo, suffix = "", kind = "download") {
   const cnpj = String(processo?.cnpjCompra || "").trim();
   const ano = String(processo?.anoCompra || "").trim();
   const seq = String(processo?.sequencialCompra || "").trim();
   if (!cnpj || !/^\d{4}$/.test(ano) || !/^\d+$/.test(seq)) return [];
-  return PNCP_FILE_API_BASES.map(base =>
+  const bases = kind === "list" ? PNCP_FILE_LIST_BASES : PNCP_FILE_DOWNLOAD_BASES;
+  return bases.map(base =>
     `${base}/orgaos/${encodeURIComponent(cnpj)}/compras/${encodeURIComponent(ano)}/${encodeURIComponent(seq)}${suffix}`
   );
 }
@@ -1574,6 +1584,75 @@ function extractList(data, keys = []) {
   if (Array.isArray(data)) return data;
   for (const key of keys) if (Array.isArray(data?.[key])) return data[key];
   return getArray(data);
+}
+
+// O PNCP possui respostas com pequenas diferenças entre versões/rotas:
+// algumas retornam {documentos:[...]}, outras {data:{documentos:[...]}},
+// outras entregam a lista diretamente ou dentro de content/results. Não
+// podemos depender de um único envelope, pois isso fazia a lista de documentos
+// aparecer vazia mesmo quando o endpoint respondia 200.
+function extractDocumentList(payload) {
+  const candidates = [];
+  const seen = new Set();
+  const queue = [{ value: payload, depth: 0 }];
+  const keys = [
+    "documentos", "Documentos", "arquivos", "Arquivos",
+    "listaDocumentos", "listaArquivos", "content", "items",
+    "data", "result", "results", "dados"
+  ];
+
+  while (queue.length) {
+    const { value, depth } = queue.shift();
+    if (!value || typeof value !== "object" || seen.has(value) || depth > 5) continue;
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      if (value.some(item => item && typeof item === "object" && (
+        item.sequencialDocumento != null || item.sequencial_documento != null ||
+        item.url || item.urlDownload || item.uri || item.link || item.titulo || item.nome
+      ))) {
+        candidates.push(...value);
+      }
+      for (const item of value) if (item && typeof item === "object") queue.push({ value: item, depth: depth + 1 });
+      continue;
+    }
+
+    for (const key of keys) {
+      if (value[key] != null) queue.push({ value: value[key], depth: depth + 1 });
+    }
+  }
+
+  const unique = new Map();
+  for (const doc of candidates) {
+    if (!doc || typeof doc !== "object") continue;
+    const seq = doc.sequencialDocumento ?? doc.sequencial_documento ?? doc.sequencial ?? null;
+    const url = doc.url || doc.urlDownload || doc.uri || doc.link || null;
+    const title = doc.titulo || doc.tituloDocumento || doc.nome || doc.nomeArquivo || doc.fileName || "Documento";
+    if (seq == null && !url && title === "Documento") continue;
+
+    // Algumas respostas trazem apenas a URL. Se o sequencial estiver dentro
+    // dela, recuperamos para habilitar Visualizar/Baixar pelo proxy local.
+    let normalizedSeq = seq;
+    if (normalizedSeq == null && url) {
+      const match = String(url).match(/\/arquivos\/(\d+)(?:[/?#]|$)/i);
+      if (match) normalizedSeq = Number(match[1]);
+    }
+
+    const key = normalizedSeq != null ? `seq:${normalizedSeq}` : `url:${url}`;
+    if (!unique.has(key)) {
+      unique.set(key, {
+        sequencialDocumento: normalizedSeq,
+        titulo: title,
+        nome: doc.nome || doc.titulo || title,
+        tipoDocumentoId: doc.tipoDocumentoId ?? doc.tipo_documento_id ?? doc.tipoDocumentoCodigo ?? null,
+        tipoDocumentoNome: doc.tipoDocumentoNome || doc.tipo_documento_nome || doc.tipoDocumentoDescricao || doc.tipoDocumentoDescricao || "Documento",
+        dataPublicacaoPncp: doc.dataPublicacaoPncp || doc.data_publicacao_pncp || doc.dataPublicacao || null,
+        url
+      });
+    }
+  }
+
+  return [...unique.values()];
 }
 
 function compactDetail(data) {
@@ -1635,7 +1714,7 @@ app.get("/api/processos/detalhes", async (req, res) => {
   const base = buildCompraApiUrl(processoBase);
   const urls = {
     contratacao: base,
-    documentos: buildFileApiUrls(processoBase, "/arquivos")[0] || buildCompraApiUrl(processoBase, "/arquivos"),
+    documentos: buildFileApiUrls(processoBase, "/arquivos", "list")[0] || buildCompraApiUrl(processoBase, "/arquivos"),
     itens: buildCompraApiUrl(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
     historico: buildCompraApiUrl(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
     fontesOrcamentarias: buildCompraApiUrl(processoBase, "/fonte-orcamentaria"),
@@ -1648,7 +1727,8 @@ app.get("/api/processos/detalhes", async (req, res) => {
   // as que alimentam os dados principais e a lista de editais/documentos.
   const contratacao = await fetchJsonWithOptions(urls.contratacao, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: DETAIL_RETRIES });
   const documentoResult = await fetchPncpDocumentsForEnrichment(processoBase);
-  const docs = documentoResult.docs || [];
+  const embeddedDocs = extractDocumentList(contratacao.data);
+  const docs = documentoResult.docs?.length ? documentoResult.docs : embeddedDocs;
   const errors = [];
   if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
   if (documentoResult.errors?.length) errors.push(...documentoResult.errors.map(e => `documentos: ${e}`));
@@ -1664,7 +1744,7 @@ app.get("/api/processos/detalhes", async (req, res) => {
       tipoDocumentoId: doc?.tipoDocumentoId ?? doc?.tipo_documento_id ?? null,
       tipoDocumentoNome: doc?.tipoDocumentoNome || doc?.tipo_documento_nome || "Documento",
       dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
-      url: doc?.url || doc?.link || null
+      url: doc?.url || doc?.urlDownload || doc?.uri || doc?.link || null
     })),
     itens: [], historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
     extrasPendentes: true,
