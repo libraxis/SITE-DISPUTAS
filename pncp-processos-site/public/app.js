@@ -295,7 +295,13 @@ async function openDetails(index, sourceRows = processos) {
       try {
         const extrasFallback = encodeURIComponent(JSON.stringify(process));
         const extras = await api(`/api/processos/detalhes-extras?id=${encodeURIComponent(process.controlePncp)}&fallback=${extrasFallback}`);
-        currentData = { ...data, ...extras, extrasPendentes: false };
+        currentData = {
+          ...data,
+          ...extras,
+          itens: Array.isArray(extras.itens) && extras.itens.length ? extras.itens : (data.itens || []),
+          documentos: Array.isArray(extras.documentos) && extras.documentos.length ? extras.documentos : (data.documentos || []),
+          extrasPendentes: false
+        };
         renderDetails(currentData, process);
       } catch (extraError) {
         currentData = { ...data, extrasPendentes: false, erros: [...(data.erros || []), `Dados complementares: ${extraError.message}`] };
