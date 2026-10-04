@@ -144,31 +144,6 @@ function pick(obj, ...keys) {
   return null;
 }
 
-// O PNCP nem sempre devolve a UF com o mesmo formato em todos os endpoints.
-// Alguns retornos trazem "PR", outros podem vir com espaços, caixa diferente
-// ou até com o nome do Estado. Normalizamos antes de aplicar o filtro.
-function normalizeUf(value) {
-  const raw = normalizeText(value).replace(/\s+/g, "");
-  if (!raw) return "";
-  const aliases = {
-    acre: "AC", alagoas: "AL", amapa: "AP", amazonas: "AM", bahia: "BA",
-    ceara: "CE", "distritofederal": "DF", "espiritosanto": "ES", goias: "GO",
-    maranhao: "MA", "matogrosso": "MT", "matogrossodosul": "MS", minasgerais: "MG",
-    para: "PA", paraiba: "PB", parana: "PR", pernambuco: "PE", piaui: "PI",
-    rj: "RJ", riodejaneiro: "RJ", rio: "RJ", "riograndedonorte": "RN",
-    riograndedosul: "RS", rondonia: "RO", roraima: "RR", santacatarina: "SC",
-    saopaulo: "SP", sergipe: "SE", tocantins: "TO"
-  };
-  const uf = raw.toUpperCase();
-  if (/^[A-Z]{2}$/.test(uf)) return uf;
-  return aliases[raw] || "";
-}
-
-function sameUf(actual, requested) {
-  if (!requested) return true;
-  return normalizeUf(actual) === normalizeUf(requested);
-}
-
 function formatDateYYYYMMDD(date = new Date()) {
   return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
 }
@@ -323,7 +298,7 @@ async function searchPortalHtmlFallback(uf, keyword, diagnostics) {
         if (!base.cnpjCompra || !base.anoCompra || !base.sequencialCompra) continue;
         const data = await fetchJson(buildCompraApiUrl(base));
         const processo = normalizeProcesso(data || { numeroControlePNCP: controle });
-        if (isDivulgada(processo) && isOpen(processo) && sameUf(processo.uf, uf) && matches(processo, keyword)) details.push(processo);
+        if (isDivulgada(processo) && isOpen(processo) && (!uf || processo.uf === uf) && matches(processo, keyword)) details.push(processo);
       } catch (_) {}
     }
   }
@@ -397,7 +372,7 @@ function normalizeProcesso(item, modalidadeFallback = null) {
     processo: pick(item, "processo", "numeroProcesso") || "",
     orgao: pick(item, "orgao_nome", "orgaoNome", "razaoSocial") || org?.razaoSocial || org?.razaoSocialOrgao || org?.nome || "Órgão não informado",
     unidade: pick(item, "unidade_nome", "unidadeNome") || unidade?.nomeUnidade || unidade?.nome || "",
-    uf: normalizeUf(pick(item, "uf", "uf_sigla", "ufSigla") || unidade?.ufSigla || org?.ufSigla || ""),
+    uf: String(pick(item, "uf", "uf_sigla", "ufSigla") || unidade?.ufSigla || org?.ufSigla || "").toUpperCase(),
     municipio: pick(item, "municipio_nome", "municipioNome", "municipio") || unidade?.municipioNome || "",
     modalidade: pick(item, "modalidade_licitacao_nome", "modalidadeNome", "modalidade") || MODALIDADES[modalidadeCodigo] || "Não informada",
     modalidadeCodigo,
@@ -1328,7 +1303,7 @@ async function searchPortalApiHost(endpoint, uf, keyword) {
     const items = getArray(data);
     for (const raw of items) {
       const processo = normalizeProcesso(raw);
-      if (isDivulgada(processo) && isOpen(processo) && sameUf(processo.uf, uf) && matches(processo, keyword)) found.push(processo);
+      if (isDivulgada(processo) && isOpen(processo) && (!uf || processo.uf === uf) && matches(processo, keyword)) found.push(processo);
     }
     if (!items.length || items.length < SEARCH_PAGE_SIZE) break;
   }
@@ -1361,7 +1336,7 @@ async function searchPortalApi(uf, keyword, diagnostics) {
 
     for (const raw of items) {
       const processo = normalizeProcesso(raw);
-      if (isDivulgada(processo) && isOpen(processo) && sameUf(processo.uf, uf) && matches(processo, keyword)) {
+      if (isDivulgada(processo) && isOpen(processo) && (!uf || processo.uf === uf) && matches(processo, keyword)) {
         found.push(processo);
       }
     }
@@ -1435,7 +1410,7 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
           const terms = normalizeText(keyword).split(/\s+/).filter(Boolean);
           const termMatch = terms.every(t => searchable.includes(t));
           if (!termMatch) { st.rejeitadosTermo++; continue; }
-          if (uf && processo.uf && !sameUf(processo.uf, uf)) continue;
+          if (uf && processo.uf && processo.uf !== uf) continue;
           const end = parsePncpDate(processo.encerramento);
           const start = parsePncpDate(processo.abertura);
           // Só interessa o que ainda recebe propostas. Se a data de fim não
