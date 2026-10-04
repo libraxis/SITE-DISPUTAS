@@ -52,6 +52,7 @@ const PORT = process.env.PORT || 3000;
 
 // API usada pelo próprio portal de pesquisa do PNCP.
 const PNCP_SEARCH = "https://pncp.gov.br/api/search/";
+const PNCP_SEARCH_ALTERNATE = "https://www.pncp.gov.br/api/search/";
 // API oficial de consulta, usada como fallback.
 const PNCP_PROPOSTA = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
 const PNCP_PORTAL = "https://pncp.gov.br/app/editais";
@@ -59,9 +60,9 @@ const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 
 const CACHE_MS = 2 * 60 * 1000;
 const SEARCH_PAGE_SIZE = 50;
-const SEARCH_MAX_PAGES = 5;
+const SEARCH_MAX_PAGES = 8;
 const REQUEST_TIMEOUT_MS = 10000;
-const RETRIES = 4;
+const RETRIES = 6;
 const DETAIL_CONTRATACAO_TIMEOUT_MS = 20000;
 const DETAIL_DOCUMENTOS_TIMEOUT_MS = 30000;
 const DETAIL_RETRIES = 4;
@@ -1228,6 +1229,29 @@ function portalUrl(uf, keyword) {
   return `${PNCP_PORTAL}?${p}`;
 }
 
+async function searchPortalApiHost(endpoint, uf, keyword) {
+  const found = [];
+  for (let pagina = 1; pagina <= Math.min(SEARCH_MAX_PAGES, 4); pagina++) {
+    const params = new URLSearchParams({
+      tipos_documento: "edital",
+      q: keyword,
+      ordenacao: "-data",
+      status: "recebendo_proposta",
+      pagina: String(pagina),
+      tam_pagina: String(SEARCH_PAGE_SIZE)
+    });
+    if (uf) params.set("ufs", uf);
+    const data = await fetchJson(`${endpoint}?${params}`);
+    const items = getArray(data);
+    for (const raw of items) {
+      const processo = normalizeProcesso(raw);
+      if (isDivulgada(processo) && isOpen(processo) && (!uf || processo.uf === uf) && matches(processo, keyword)) found.push(processo);
+    }
+    if (!items.length || items.length < SEARCH_PAGE_SIZE) break;
+  }
+  return found;
+}
+
 async function searchPortalApi(uf, keyword, diagnostics) {
   const found = [];
   let total = 0;
@@ -1281,94 +1305,111 @@ async function searchPortalApi(uf, keyword, diagnostics) {
 async function fallbackPropostaApi(uf, keyword, diagnostics) {
   const found = [];
   const dataFinal = formatDateYYYYMMDD();
+  const modalidades = Object.keys(MODALIDADES).map(Number);
+  const maxPages = 3;
+  const tamanhoPagina = 50;
   let rawTotal = 0;
   let pagesRead = 0;
-  let totalPages = null;
   let matchedRaw = 0;
   let rejectedKeyword = 0;
   let rejectedUf = 0;
   let detailRecovered = 0;
+  const modalityStats = [];
 
-  // IMPORTANTE: /contratacoes/proposta aceita a modalidade como filtro OPCIONAL.
-  // A versão anterior percorria somente [6,4,5,7,8,9], o que fazia o fallback
-  // perder contratações de outras modalidades e, em alguns momentos, retornar 0.
-  // Aqui consultamos a fila geral de propostas abertas, filtrando UF e termo no
-  // próprio aplicativo. Isso segue a definição oficial do endpoint de propostas.
-  const maxPages = 3;
-  const tamanhoPagina = 50;
-
-  for (let pagina = 1; pagina <= maxPages; pagina++) {
-    const params = new URLSearchParams({
-      dataFinal,
-      pagina: String(pagina),
-      tamanhoPagina: String(tamanhoPagina)
-    });
-    if (uf) params.set("uf", uf);
-
-    const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
-    const items = getArray(data);
-    pagesRead++;
-    rawTotal += items.length;
-    totalPages = Number(data?.totalPaginas ?? data?.totalPages ?? data?.numeroPaginas ?? 0) || totalPages;
-
-    for (const raw of items) {
-      let processo = normalizeProcesso(raw);
-
-      // O endpoint já é específico para propostas abertas. Não exigimos
-      // situacaoCompraId=1 aqui, pois alguns registros não trazem esse campo.
-      if (uf && processo.uf && processo.uf !== uf) {
-        rejectedUf++;
-        continue;
+  // A API /proposta historicamente foi documentada com codigoModalidadeContratacao
+  // obrigatório. Mesmo quando algumas versões aceitam a omissão, o PNCP pode
+  // devolver uma amostra muito pequena. Por isso o fallback percorre todas as
+  // modalidades conhecidas, mantendo UF e paginação, e deduplica no final.
+  async function scanModalidade(codigo) {
+    const local = { codigo, nome: MODALIDADES[codigo] || `Modalidade ${codigo}`, paginas: 0, registros: 0, encontrados: 0, rejeitadosTermo: 0, recuperadosPorDetalhe: 0 };
+    const localFound = [];
+    for (let pagina = 1; pagina <= maxPages; pagina++) {
+      const params = new URLSearchParams({
+        dataFinal,
+        codigoModalidadeContratacao: String(codigo),
+        pagina: String(pagina),
+        tamanhoPagina: String(tamanhoPagina)
+      });
+      if (uf) params.set("uf", uf);
+      const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
+      const items = getArray(data);
+      local.paginas++;
+      local.registros += items.length;
+      for (const raw of items) {
+        let processo = normalizeProcesso(raw);
+        if (uf && processo.uf && processo.uf !== uf) {
+          rejectedUf++;
+          continue;
+        }
+        let isMatch = matches(processo, keyword);
+        if (!isMatch && processo.cnpjCompra && processo.anoCompra && processo.sequencialCompra) {
+          try {
+            const detail = await fetchJson(buildCompraApiUrl(processo));
+            const detailed = normalizeProcesso(detail || raw, codigo);
+            processo = { ...processo, ...detailed,
+              controlePncp: detailed.controlePncp || processo.controlePncp,
+              cnpjCompra: detailed.cnpjCompra || processo.cnpjCompra,
+              anoCompra: detailed.anoCompra || processo.anoCompra,
+              sequencialCompra: detailed.sequencialCompra || processo.sequencialCompra };
+            isMatch = matches(processo, keyword);
+            if (isMatch) { detailRecovered++; local.recuperadosPorDetalhe++; }
+          } catch (_) {}
+        }
+        if (!isMatch) { rejectedKeyword++; local.rejeitadosTermo++; continue; }
+        matchedRaw++;
+        local.encontrados++;
+        localFound.push(processo);
       }
-
-      let isMatch = matches(processo, keyword);
-
-      // Alguns retornos do endpoint de proposta trazem apenas o identificador
-      // e poucos metadados. Nesse caso, consulta-se a contratação individual
-      // antes de rejeitar o termo pesquisado.
-      if (!isMatch && processo.cnpjCompra && processo.anoCompra && processo.sequencialCompra) {
-        try {
-          const detail = await fetchJson(buildCompraApiUrl(processo));
-          const detailed = normalizeProcesso(detail || raw, processo.modalidadeCodigo);
-          processo = {
-            ...processo,
-            ...detailed,
-            controlePncp: detailed.controlePncp || processo.controlePncp,
-            cnpjCompra: detailed.cnpjCompra || processo.cnpjCompra,
-            anoCompra: detailed.anoCompra || processo.anoCompra,
-            sequencialCompra: detailed.sequencialCompra || processo.sequencialCompra
-          };
-          isMatch = matches(processo, keyword);
-          if (isMatch) detailRecovered++;
-        } catch (_) {}
-      }
-
-      if (!isMatch) {
-        rejectedKeyword++;
-        continue;
-      }
-
-      matchedRaw++;
-      found.push(processo);
+      if (!items.length || items.length < tamanhoPagina) break;
+      await new Promise(resolve => setTimeout(resolve, 150));
     }
-
-    if (!items.length || items.length < tamanhoPagina || (totalPages && pagina >= totalPages)) break;
-    await new Promise(resolve => setTimeout(resolve, 250));
+    return { local, localFound };
   }
+
+  // Quatro modalidades por vez: evita uma espera sequencial enorme, mas também
+  // não dispara dezenas de conexões simultâneas contra o PNCP.
+  const concurrency = 4;
+  let cursor = 0;
+  const results = [];
+  async function worker() {
+    while (true) {
+      const i = cursor++;
+      if (i >= modalidades.length) return;
+      try { results[i] = await scanModalidade(modalidades[i]); }
+      catch (error) {
+        results[i] = { local: { codigo: modalidades[i], nome: MODALIDADES[modalidades[i]], erro: error.message, status: error.status || null, paginas: 0, registros: 0, encontrados: 0 }, localFound: [] };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+
+  const byId = new Map();
+  for (const result of results) {
+    if (!result) continue;
+    modalityStats.push(result.local);
+    rawTotal += result.local.registros || 0;
+    pagesRead += result.local.paginas || 0;
+    for (const processo of result.localFound) {
+      const id = processo.controlePncp || `${processo.cnpjCompra}|${processo.anoCompra}|${processo.sequencialCompra}`;
+      if (!byId.has(id)) byId.set(id, processo);
+    }
+  }
+  found.push(...byId.values());
 
   diagnostics.fallback = {
     endpoint: PNCP_PROPOSTA,
     dataFinal,
-    modalidades: "todas (filtro de modalidade omitido; endpoint oficial aceita filtro opcional)",
+    modalidades: modalidades,
     paginasLidas: pagesRead,
     registrosRecebidos: rawTotal,
     encontrados: found.length,
-    limite: `${maxPages} páginas`,
+    limite: `${maxPages} páginas por modalidade`,
     tamanhoPagina,
     correspondenciasAntesDeDuplicar: matchedRaw,
     rejeitadosPorTermo: rejectedKeyword,
     rejeitadosPorUF: rejectedUf,
-    recuperadosPorDetalhe: detailRecovered
+    recuperadosPorDetalhe: detailRecovered,
+    modalidadesDetalhadas: modalityStats
   };
   return found;
 }
@@ -1641,10 +1682,27 @@ app.get("/api/processos", async (req, res) => {
     primaryError = error;
     diagnostics.primary = { erro: error.message, status: error.status || null };
     diagnostics.warnings.push(`API de busca do portal: ${error.message}`);
+
+    // Em algumas janelas o host sem www retorna 503 enquanto o mesmo serviço
+    // responde normalmente pelo host canônico com www. Tentamos a rota equivalente
+    // antes de cair para a varredura por modalidade.
+    try {
+      const alternate = await searchPortalApiHost(PNCP_SEARCH_ALTERNATE, uf, keyword);
+      if (alternate.length) {
+        processos = alternate;
+        primaryError = null;
+        diagnostics.primary.alternate = { endpoint: PNCP_SEARCH_ALTERNATE, encontrados: alternate.length };
+        diagnostics.warnings.push("API de busca alternativa (www.pncp.gov.br) respondeu com resultados.");
+      }
+    } catch (alternateError) {
+      diagnostics.primary.alternate = { erro: alternateError.message, status: alternateError.status || null };
+    }
   }
 
-  // Se a busca textual do próprio portal falhar ou vier vazia, usa a API /proposta.
-  if (primaryError) {
+  // Se a busca textual do próprio portal falhar OU vier vazia, usa a API /proposta.
+  // O PNCP pode responder HTTP 200 com uma página vazia durante uma degradação parcial,
+  // então não podemos depender apenas de primaryError.
+  if (primaryError || processos.length === 0) {
     try {
       const fallback = await fallbackPropostaApi(uf, keyword, diagnostics);
       processos.push(...fallback);
