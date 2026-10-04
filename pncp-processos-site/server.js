@@ -107,6 +107,9 @@ const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 const SITUACAO_DIVULGADA_ID = 1;
 const SITUACAO_DIVULGADA_NOME = "Divulgada no PNCP";
 const cache = new Map();
+// Cache curto dos resultados já encontrados pela busca. Serve apenas como fallback
+// para a tela de detalhes quando a API de detalhe do PNCP estiver indisponível.
+const processoDetalheCache = new Map();
 
 const MODALIDADES = {
   1: "Leilão - Eletrônico",
@@ -1685,9 +1688,14 @@ app.get("/api/processos/detalhes", async (req, res) => {
     return res.status(400).json({ error: "Não foi possível identificar CNPJ, ano e sequencial a partir do ID PNCP." });
   }
 
+  // Para leitura de detalhes, priorizamos a API pública de CONSULTA do PNCP.
+  // O mecanismo de busca permanece intocado.
+  const consultaDetalheUrls = buildConsultaUrls(
+    `/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/compras/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`
+  );
   const compraUrls = [
-    ...buildCompraApiUrls(processoBase),
-    ...buildConsultaUrls(`/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/compras/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`)
+    ...consultaDetalheUrls,
+    ...buildCompraApiUrls(processoBase)
   ];
   const urls = {
     contratacao: compraUrls[0] || null,
@@ -1703,13 +1711,32 @@ app.get("/api/processos/detalhes", async (req, res) => {
   // O Chrome do usuário pode estar recebendo 503 de um host/rota do PNCP enquanto
   // outro host oficial responde normalmente. Por isso o detalhe tenta os hosts
   // oficiais em sequência antes de declarar a contratação indisponível.
-  const contratacao = await fetchFirstWorkingJson(compraUrls, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: 2 });
+  let contratacao = await fetchFirstWorkingJson(compraUrls, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS, retries: 2 });
+
+  // Se a API de detalhe estiver temporariamente indisponível, usamos como
+  // fallback os dados do próprio resultado que já foi encontrado na busca.
+  // Isso evita deixar o modal vazio por uma falha 503/timeout do PNCP.
+  let usadoFallbackDaBusca = false;
+  if (!contratacao.data) {
+    const cachedProcesso = processoDetalheCache.get(controle);
+    if (cachedProcesso?.processo) {
+      contratacao = {
+        data: cachedProcesso.processo,
+        error: contratacao.error,
+        url: null,
+        errors: contratacao.errors || []
+      };
+      usadoFallbackDaBusca = true;
+    }
+  }
+
   const documentoResult = await fetchPncpDocumentsForEnrichment(processoBase);
   const embeddedDocs = extractDocumentList(contratacao.data);
   const docs = documentoResult.docs?.length ? documentoResult.docs : embeddedDocs;
   const errors = [];
-  if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
-  if (documentoResult.errors?.length) errors.push(...documentoResult.errors.map(e => `documentos: ${e}`));
+  if (usadoFallbackDaBusca) errors.push("API de detalhe do PNCP indisponível no momento; dados básicos recuperados do resultado da busca.");
+  else if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
+  if (documentoResult.errors?.length && !documentoResult.docs?.length) errors.push(...documentoResult.errors.map(e => `documentos: ${e}`));
 
   res.json({
     ok: Boolean(contratacao.data),
@@ -2005,6 +2032,11 @@ app.get("/api/processos", async (req, res) => {
     consulta: diagnostics
   };
 
+  // Guarda somente os processos que a busca já encontrou para permitir que a
+  // tela de detalhes tenha um fallback local se a API individual do PNCP falhar.
+  for (const processo of final) {
+    if (processo?.controlePncp) processoDetalheCache.set(processo.controlePncp, { at: Date.now(), processo });
+  }
   cache.set(key, { at: Date.now(), data });
   res.json(data);
 });
