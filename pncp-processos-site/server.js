@@ -52,6 +52,9 @@ process.stdout.write = function(chunk, encoding, callback) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// O parser JSON precisa estar registrado antes das rotas de autenticação/admin.
+app.use(express.json({ limit: "1mb" }));
+
 // -----------------------------
 // Autenticação e administração
 // -----------------------------
@@ -367,7 +370,6 @@ const MODALIDADES = {
   15: "Chamada Pública"
 };
 
-app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 function normalizeText(value) {
