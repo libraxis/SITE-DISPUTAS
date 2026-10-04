@@ -6,7 +6,22 @@
   <title>ST Processos • PNCP</title>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body class="app-locked">
+  <div id="loginScreen" class="login-screen">
+    <div class="login-card">
+      <div class="login-brand"><div class="logo">ST</div><div><strong>ST Processos</strong><small>acesso restrito</small></div></div>
+      <div class="eyebrow">AUTENTICAÇÃO</div>
+      <h1>Entrar no sistema</h1>
+      <p class="muted">Informe o CNPJ da empresa e a senha para acessar o ST Processos.</p>
+      <form id="loginForm" class="login-form">
+        <label>CNPJ da empresa<input id="loginCnpj" autocomplete="username" placeholder="CNPJ ou adm" required></label>
+        <label>Senha<input id="loginPassword" type="password" autocomplete="current-password" placeholder="Senha" required></label>
+        <button id="loginBtn" class="primary" type="submit">Entrar</button>
+      </form>
+      <div id="loginMessage" class="login-message hidden" role="alert"></div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
 
   <aside class="sidebar">
@@ -20,9 +35,13 @@
 
     <nav>
       <button class="nav active" data-view="buscar">BUSCAR PROCESSOS</button>
+      <button class="nav admin-only hidden" data-view="credenciais">ADMINISTRAR CREDENCIAIS</button>
+      <button class="nav admin-only hidden" data-view="manutencao">CONFIGURAÇÕES/MANUTENÇÃO</button>
     </nav>
 
     <div class="sidebar-bottom">
+      <div id="currentUserBadge" class="auth-user hidden"></div>
+      <button id="logoutBtn" class="sidebar-logout" type="button">Sair</button>
       <div class="auth-badge online">PNCP ONLINE</div>
     </div>
   </aside>
@@ -192,6 +211,38 @@
             </tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section id="credenciaisView" class="view hidden">
+      <div class="card admin-hero">
+        <div class="card-head"><div><div class="eyebrow">ADMINISTRAÇÃO</div><h3>Administrar credenciais</h3></div></div>
+        <p class="muted">Cadastre empresas autorizadas a utilizar o sistema, altere suas credenciais ou remova o acesso.</p>
+        <form id="credentialForm" class="admin-form">
+          <input type="hidden" id="credentialOriginalCnpj">
+          <label>CNPJ<input id="credentialCnpj" placeholder="00.000.000/0000-00" required></label>
+          <label>Nome da empresa<input id="credentialCompany" placeholder="Nome da empresa" required></label>
+          <label>Senha<input id="credentialPassword" type="password" placeholder="Senha inicial / nova senha"></label>
+          <div class="admin-form-actions"><button id="credentialSaveBtn" class="primary" type="submit">Cadastrar empresa</button><button id="credentialCancelBtn" class="ghost hidden" type="button">Cancelar edição</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="card-head"><div><h3>Empresas cadastradas</h3><span class="muted">Credenciais autorizadas a acessar o sistema.</span></div><button id="refreshCredentialsBtn" class="ghost" type="button">Atualizar</button></div>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Empresa</th><th>CNPJ / usuário</th><th>Ação</th></tr></thead><tbody id="credentialsTableBody"><tr><td colspan="3" class="empty">Carregando...</td></tr></tbody></table></div>
+      </div>
+    </section>
+
+    <section id="manutencaoView" class="view hidden">
+      <div class="card admin-hero">
+        <div class="card-head"><div><div class="eyebrow">ADMINISTRAÇÃO</div><h3>Configurações / manutenção</h3></div></div>
+        <div class="maintenance-card">
+          <div><strong>Fechar o site para manutenção</strong><p class="muted">Ao ativar, todos os usuários comuns serão deslogados imediatamente. Somente o administrador continuará com acesso.</p></div>
+          <label class="switch"><input id="maintenanceToggle" type="checkbox"><span></span></label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div><h3>VISUALIZAR USUÁRIOS</h3><span class="muted">Usuários conectados neste momento.</span></div><button id="refreshActiveUsersBtn" class="ghost" type="button">Atualizar</button></div>
+        <div class="table-wrap"><table class="admin-table"><thead><tr><th>Usuário</th><th>IP</th><th>Entrada</th><th>Ação</th></tr></thead><tbody id="activeUsersTableBody"><tr><td colspan="4" class="empty">Carregando...</td></tr></tbody></table></div>
       </div>
     </section>
   </main>

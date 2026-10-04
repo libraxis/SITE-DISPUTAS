@@ -1,6 +1,54 @@
 let processos = [];
+let currentUser = null;
+let authPollTimer = null;
 
 const $ = selector => document.querySelector(selector);
+
+function showLogin(message = "") {
+  currentUser = null;
+  document.body.classList.add("app-locked");
+  const screen = $("#loginScreen");
+  if (screen) screen.classList.remove("hidden");
+  const box = $("#loginMessage");
+  if (box) { box.textContent = message; box.classList.toggle("hidden", !message); }
+  const password = $("#loginPassword");
+  if (password) password.value = "";
+}
+
+function hideLogin(user) {
+  currentUser = user;
+  document.body.classList.remove("app-locked");
+  $("#loginScreen")?.classList.add("hidden");
+  $("#loginMessage")?.classList.add("hidden");
+  const badge = $("#currentUserBadge");
+  if (badge) {
+    badge.innerHTML = `<strong>${esc(user?.name || user?.username || "Usuário")}</strong>${esc(user?.role === "admin" ? "Administrador" : user?.username || "")}`;
+    badge.classList.remove("hidden");
+  }
+  document.querySelectorAll(".admin-only").forEach(el => el.classList.toggle("hidden", user?.role !== "admin"));
+  if (user?.role !== "admin" && ["credenciais","manutencao"].includes(window.currentView)) switchView("buscar");
+}
+
+function switchView(view) {
+  const allowed = view === "buscar" || (currentUser?.role === "admin" && ["credenciais","manutencao"].includes(view));
+  if (!allowed) view = "buscar";
+  window.currentView = view;
+  document.querySelectorAll(".view").forEach(el => el.classList.add("hidden"));
+  const target = document.getElementById(`${view}View`);
+  if (target) target.classList.remove("hidden");
+  document.querySelectorAll(".nav").forEach(el => el.classList.toggle("active", el.dataset.view === view));
+  const title = { buscar: "Buscar processos", credenciais: "Administrar credenciais", manutencao: "Configurações / manutenção" }[view] || "ST Processos";
+  const h1 = document.querySelector(".topbar h1"); if (h1) h1.textContent = title;
+  if (view === "credenciais") loadCredentials();
+  if (view === "manutencao") loadMaintenancePanel();
+}
+
+async function handleAuthFailure(errorData) {
+  const message = errorData?.error || "Sua sessão não está mais ativa. Faça login novamente.";
+  if (errorData?.code === "MAINTENANCE") showLogin(message);
+  else showLogin(message);
+}
+
 
 const esc = value =>
   String(value ?? "").replace(/[&<>"']/g, char => ({
@@ -24,8 +72,13 @@ async function api(url, options = {}) {
   let data = {};
   try { data = await response.json(); } catch (_) {}
   if (!response.ok) {
+    if (response.status === 401 || response.status === 423) {
+      await handleAuthFailure(data);
+    }
     const detail = data.error || data.message || `HTTP ${response.status}`;
-    throw new Error(`Falha ao consultar os detalhes: ${detail}`);
+    const error = new Error(`Falha ao consultar os detalhes: ${detail}`);
+    error.status = response.status; error.code = data.code;
+    throw error;
   }
   return data;
 }
@@ -366,6 +419,141 @@ function closeDetails() {
   $("#detailsModal").classList.add("hidden");
 }
 
+
+async function login(event) {
+  event?.preventDefault();
+  const btn = $("#loginBtn");
+  const message = $("#loginMessage");
+  const cnpj = $("#loginCnpj").value.trim();
+  const senha = $("#loginPassword").value;
+  if (!cnpj || !senha) return;
+  btn.disabled = true; btn.textContent = "Entrando...";
+  message.classList.add("hidden");
+  try {
+    const data = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ cnpj, senha }) });
+    hideLogin(data.user);
+    switchView("buscar");
+    startAuthPolling();
+  } catch (error) {
+    message.textContent = error.message.replace(/^Falha ao consultar os detalhes:\s*/, "");
+    message.classList.remove("hidden");
+  } finally { btn.disabled = false; btn.textContent = "Entrar"; }
+}
+
+async function logoutLocal(message = "") {
+  try { await fetch("/api/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" } }); } catch (_) {}
+  showLogin(message);
+  switchView("buscar");
+}
+
+async function checkAuth() {
+  try {
+    const data = await api("/api/auth/me");
+    hideLogin(data.user);
+    startAuthPolling();
+    return true;
+  } catch (_) {
+    showLogin();
+    return false;
+  }
+}
+
+function startAuthPolling() {
+  clearInterval(authPollTimer);
+  authPollTimer = setInterval(async () => {
+    if (!currentUser) return;
+    try {
+      const data = await api("/api/auth/status");
+      if (!data.user?.authenticated) await logoutLocal("Sua sessão foi encerrada. Faça login novamente.");
+    } catch (error) {
+      if (error.status === 401 || error.status === 423) showLogin(error.message.replace(/^Falha ao consultar os detalhes:\s*/, ""));
+    }
+  }, 3500);
+}
+
+function resetCredentialForm() {
+  $("#credentialOriginalCnpj").value = "";
+  $("#credentialCnpj").value = "";
+  $("#credentialCompany").value = "";
+  $("#credentialPassword").value = "";
+  $("#credentialSaveBtn").textContent = "Cadastrar empresa";
+  $("#credentialCancelBtn").classList.add("hidden");
+}
+
+async function loadCredentials() {
+  if (currentUser?.role !== "admin") return;
+  const body = $("#credentialsTableBody");
+  try {
+    const data = await api("/api/admin/credentials");
+    body.innerHTML = data.users.length ? data.users.map(user => `
+      <tr><td><strong>${esc(user.nomeEmpresa || "—")}</strong></td><td>${esc(user.cnpj)}</td><td><div class="table-actions"><button class="ghost credential-edit" data-cnpj="${esc(user.cnpj)}" type="button">Detalhes</button><button class="danger-btn credential-delete" data-cnpj="${esc(user.cnpj)}" type="button">Excluir</button></div></td></tr>
+    `).join("") : `<tr><td colspan="3" class="empty">Nenhuma empresa cadastrada.</td></tr>`;
+    body.querySelectorAll(".credential-edit").forEach(btn => btn.addEventListener("click", () => editCredential(btn.dataset.cnpj)));
+    body.querySelectorAll(".credential-delete").forEach(btn => btn.addEventListener("click", () => deleteCredential(btn.dataset.cnpj)));
+  } catch (error) { body.innerHTML = `<tr><td colspan="3" class="empty">${esc(error.message)}</td></tr>`; }
+}
+
+async function editCredential(cnpj) {
+  try {
+    const data = await api("/api/admin/credentials");
+    const user = data.users.find(item => item.cnpj === cnpj);
+    if (!user) return;
+    $("#credentialOriginalCnpj").value = user.cnpj;
+    $("#credentialCnpj").value = user.cnpj;
+    $("#credentialCompany").value = user.nomeEmpresa || "";
+    $("#credentialPassword").value = "";
+    $("#credentialSaveBtn").textContent = "Salvar alterações";
+    $("#credentialCancelBtn").classList.remove("hidden");
+    $("#credentialCnpj").focus();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function saveCredential(event) {
+  event.preventDefault();
+  const original = $("#credentialOriginalCnpj").value.trim();
+  const payload = { cnpj: $("#credentialCnpj").value.trim(), nomeEmpresa: $("#credentialCompany").value.trim(), senha: $("#credentialPassword").value };
+  const btn = $("#credentialSaveBtn"); btn.disabled = true;
+  try {
+    await api(original ? `/api/admin/credentials/${encodeURIComponent(original)}` : "/api/admin/credentials", { method: original ? "PUT" : "POST", body: JSON.stringify(payload) });
+    toast(original ? "Credencial atualizada." : "Empresa cadastrada.");
+    resetCredentialForm(); await loadCredentials();
+  } catch (error) { toast(error.message, true); }
+  finally { btn.disabled = false; }
+}
+
+async function deleteCredential(cnpj) {
+  if (!confirm(`Excluir o acesso da empresa ${cnpj}? O usuário será deslogado e não poderá entrar novamente.`)) return;
+  try { await api(`/api/admin/credentials/${encodeURIComponent(cnpj)}`, { method: "DELETE" }); toast("Usuário excluído."); await loadCredentials(); }
+  catch (error) { toast(error.message, true); }
+}
+
+async function loadMaintenancePanel() {
+  if (currentUser?.role !== "admin") return;
+  try {
+    const settings = await api("/api/admin/settings"); $("#maintenanceToggle").checked = Boolean(settings.maintenance);
+    await loadActiveUsers();
+  } catch (error) { toast(error.message, true); }
+}
+async function loadActiveUsers() {
+  const body = $("#activeUsersTableBody");
+  try {
+    const data = await api("/api/admin/active-users");
+    body.innerHTML = data.users.length ? data.users.map(user => `
+      <tr><td><strong>${esc(user.name || user.username)}</strong><small>${esc(user.role === "admin" ? "Administrador" : user.username)}</small></td><td>${esc(user.ip)}</td><td>${esc(fmtDate(user.since))}</td><td>${user.role === "admin" ? '<span class="muted">Administrador</span>' : `<button class="danger-btn active-logout" data-token="${esc(user.token)}" type="button">Deslogar</button>`}</td></tr>
+    `).join("") : `<tr><td colspan="4" class="empty">Nenhum usuário conectado.</td></tr>`;
+    body.querySelectorAll(".active-logout").forEach(btn => btn.addEventListener("click", async () => {
+      try { await api(`/api/admin/active-users/${encodeURIComponent(btn.dataset.token)}/logout`, { method: "POST" }); toast("Usuário deslogado."); await loadActiveUsers(); }
+      catch (error) { toast(error.message, true); }
+    }));
+  } catch (error) { body.innerHTML = `<tr><td colspan="4" class="empty">${esc(error.message)}</td></tr>`; }
+}
+
+async function toggleMaintenance() {
+  const enabled = $("#maintenanceToggle").checked;
+  try { await api("/api/admin/maintenance", { method: "POST", body: JSON.stringify({ enabled }) }); toast(enabled ? "Site fechado para manutenção. Usuários comuns foram deslogados." : "Site reaberto."); await loadActiveUsers(); }
+  catch (error) { $("#maintenanceToggle").checked = !enabled; toast(error.message, true); }
+}
+
 async function search(event) {
   event?.preventDefault();
   const uf = $("#uf").value;
@@ -410,6 +598,14 @@ async function search(event) {
   }
 }
 
+$("#loginForm").addEventListener("submit", login);
+$("#logoutBtn").addEventListener("click", () => logoutLocal());
+$("#credentialForm").addEventListener("submit", saveCredential);
+$("#credentialCancelBtn").addEventListener("click", resetCredentialForm);
+$("#refreshCredentialsBtn").addEventListener("click", loadCredentials);
+$("#maintenanceToggle").addEventListener("change", toggleMaintenance);
+$("#refreshActiveUsersBtn").addEventListener("click", loadActiveUsers);
+document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
 $("#searchForm").addEventListener("submit", search);
 $("#resultFilter").addEventListener("input", render);
 $("#refreshBtn").addEventListener("click", () => { if ($("#keyword").value.trim()) search({ preventDefault() {} }); });
@@ -423,6 +619,9 @@ document.addEventListener("click", event => {
 
 document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("#detailsModal").classList.contains("hidden")) closeDetails(); });
 
+
+window.currentView = "buscar";
+checkAuth();
 
 // Barra horizontal fixa sincronizada com a tabela de resultados
 (function setupHorizontalScrollProxy() {
