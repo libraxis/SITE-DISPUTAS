@@ -1452,111 +1452,109 @@ async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
 async function fallbackPropostaApi(uf, keyword, diagnostics) {
   const found = [];
   const dataFinal = formatDateYYYYMMDD();
-  const modalidades = Object.keys(MODALIDADES).map(Number);
-  const maxPages = 3;
   const tamanhoPagina = 50;
+  const maxPages = 20;
   let rawTotal = 0;
   let pagesRead = 0;
   let matchedRaw = 0;
   let rejectedKeyword = 0;
   let rejectedUf = 0;
-  let detailRecovered = 0;
-  const modalityStats = [];
+  const pageStats = [];
 
-  // A API /proposta historicamente foi documentada com codigoModalidadeContratacao
-  // obrigatório. Mesmo quando algumas versões aceitam a omissão, o PNCP pode
-  // devolver uma amostra muito pequena. Por isso o fallback percorre todas as
-  // modalidades conhecidas, mantendo UF e paginação, e deduplica no final.
-  async function scanModalidade(codigo) {
-    const local = { codigo, nome: MODALIDADES[codigo] || `Modalidade ${codigo}`, paginas: 0, registros: 0, encontrados: 0, rejeitadosTermo: 0, recuperadosPorDetalhe: 0 };
+  // IMPORTANTE: a API oficial /contratacoes/proposta NÃO exige modalidade.
+  // A versão anterior percorria cada modalidade separadamente e recebia apenas
+  // uma amostra minúscula (em alguns momentos 3 registros), fazendo uma licitação
+  // perfeitamente válida desaparecer da busca. Primeiro consultamos a coleção
+  // completa de contratações com propostas abertas e só depois filtramos texto/UF.
+  // Isso é exatamente o serviço descrito no Manual de Consultas do PNCP.
+  async function scanUnfiltered(localUf) {
     const localFound = [];
     for (let pagina = 1; pagina <= maxPages; pagina++) {
       const params = new URLSearchParams({
         dataFinal,
-        codigoModalidadeContratacao: String(codigo),
         pagina: String(pagina),
         tamanhoPagina: String(tamanhoPagina)
       });
-      if (uf) params.set("uf", uf);
-      const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
+      if (localUf) params.set('uf', localUf);
+
+      let data;
+      try {
+        data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
+      } catch (error) {
+        pageStats.push({ pagina, uf: localUf || 'TODAS', erro: error.message, status: error.status || null });
+        // Uma falha transitória não invalida as páginas que já foram coletadas.
+        continue;
+      }
+
       const items = getArray(data);
-      local.paginas++;
-      local.registros += items.length;
+      pagesRead++;
+      rawTotal += items.length;
+      const stat = { pagina, uf: localUf || 'TODAS', registros: items.length, correspondencias: 0, rejeitadosTermo: 0, rejeitadosUf: 0 };
+
       for (const raw of items) {
         let processo = normalizeProcesso(raw);
-        if (uf && processo.uf && processo.uf !== uf) {
+        const rawText = normalizeText(JSON.stringify(raw));
+        const searchable = normalizeText([
+          processo.objeto, processo.complemento, processo.numero, processo.processo,
+          processo.orgao, processo.unidade, processo.municipio, processo.modalidade,
+          rawText
+        ].join(' '));
+        const terms = normalizeText(keyword).split(/\s+/).filter(Boolean);
+        const termMatch = terms.every(t => searchable.includes(t));
+
+        if (localUf && processo.uf && processo.uf !== localUf) {
           rejectedUf++;
+          stat.rejeitadosUf++;
           continue;
         }
-        let isMatch = matches(processo, keyword);
-        if (!isMatch && processo.cnpjCompra && processo.anoCompra && processo.sequencialCompra) {
-          try {
-            const detail = await fetchJson(buildCompraApiUrl(processo));
-            const detailed = normalizeProcesso(detail || raw, codigo);
-            processo = { ...processo, ...detailed,
-              controlePncp: detailed.controlePncp || processo.controlePncp,
-              cnpjCompra: detailed.cnpjCompra || processo.cnpjCompra,
-              anoCompra: detailed.anoCompra || processo.anoCompra,
-              sequencialCompra: detailed.sequencialCompra || processo.sequencialCompra };
-            isMatch = matches(processo, keyword);
-            if (isMatch) { detailRecovered++; local.recuperadosPorDetalhe++; }
-          } catch (_) {}
+        if (!termMatch) {
+          rejectedKeyword++;
+          stat.rejeitadosTermo++;
+          continue;
         }
-        if (!isMatch) { rejectedKeyword++; local.rejeitadosTermo++; continue; }
+
         matchedRaw++;
-        local.encontrados++;
+        stat.correspondencias++;
         localFound.push(processo);
       }
-      if (!items.length || items.length < tamanhoPagina) break;
-      await new Promise(resolve => setTimeout(resolve, 150));
+      pageStats.push(stat);
+
+      // A API é paginada. Página curta significa fim da coleção.
+      if (items.length < tamanhoPagina) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
     }
-    return { local, localFound };
+    return localFound;
   }
 
-  // Quatro modalidades por vez: evita uma espera sequencial enorme, mas também
-  // não dispara dezenas de conexões simultâneas contra o PNCP.
-  const concurrency = 4;
-  let cursor = 0;
-  const results = [];
-  async function worker() {
-    while (true) {
-      const i = cursor++;
-      if (i >= modalidades.length) return;
-      try { results[i] = await scanModalidade(modalidades[i]); }
-      catch (error) {
-        results[i] = { local: { codigo: modalidades[i], nome: MODALIDADES[modalidades[i]], erro: error.message, status: error.status || null, paginas: 0, registros: 0, encontrados: 0 }, localFound: [] };
-      }
-    }
+  // Primeiro usa a UF solicitada. Se por algum motivo o filtro UF do PNCP
+  // estiver degradado, uma segunda passagem sem UF ainda consegue recuperar a
+  // contratação e a filtragem local aplica a UF corretamente.
+  let localFound = await scanUnfiltered(uf);
+  if (!localFound.length && uf) {
+    localFound = await scanUnfiltered('');
   }
-  await Promise.all(Array.from({ length: concurrency }, worker));
 
   const byId = new Map();
-  for (const result of results) {
-    if (!result) continue;
-    modalityStats.push(result.local);
-    rawTotal += result.local.registros || 0;
-    pagesRead += result.local.paginas || 0;
-    for (const processo of result.localFound) {
-      const id = processo.controlePncp || `${processo.cnpjCompra}|${processo.anoCompra}|${processo.sequencialCompra}`;
-      if (!byId.has(id)) byId.set(id, processo);
-    }
+  for (const processo of localFound) {
+    const id = processo.controlePncp || `${processo.cnpjCompra}|${processo.anoCompra}|${processo.sequencialCompra}`;
+    if (id && !byId.has(id)) byId.set(id, processo);
   }
   found.push(...byId.values());
 
   diagnostics.fallback = {
     endpoint: PNCP_PROPOSTA,
     dataFinal,
-    modalidades: modalidades,
+    uf,
+    modo: 'consulta sem modalidade + filtro local por texto/UF',
     paginasLidas: pagesRead,
     registrosRecebidos: rawTotal,
     encontrados: found.length,
-    limite: `${maxPages} páginas por modalidade`,
+    limite: `${maxPages} páginas`,
     tamanhoPagina,
     correspondenciasAntesDeDuplicar: matchedRaw,
     rejeitadosPorTermo: rejectedKeyword,
     rejeitadosPorUF: rejectedUf,
-    recuperadosPorDetalhe: detailRecovered,
-    modalidadesDetalhadas: modalityStats
+    paginas: pageStats
   };
   return found;
 }
