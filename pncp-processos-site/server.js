@@ -1287,6 +1287,39 @@ async function fetchJsonOptional(url) {
   }
 }
 
+
+async function fetchJsonWithOptions(url, { timeoutMs = 8000, retries = 2 } = {}) {
+  if (!url) return { data: null, error: "URL não disponível." };
+  let lastError;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+          Referer: "https://pncp.gov.br/app/editais"
+        },
+        signal: controller.signal
+      });
+      const body = await response.text();
+      if (!response.ok) throw new Error(`PNCP HTTP ${response.status}: ${body.slice(0, 250)}`);
+      return { data: body.trim() ? JSON.parse(body) : {}, error: null };
+    } catch (error) {
+      lastError = error;
+      const retryable = error.name === "AbortError" || error.name === "TypeError" ||
+        /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR/i.test(String(error?.message || "")) ||
+        [429, 500, 502, 503, 504].includes(error.status);
+      if (!retryable || attempt === retries) break;
+      await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { data: null, error: lastError?.name === "AbortError" ? `Tempo limite de ${timeoutMs / 1000}s excedido.` : (lastError?.message || "Falha ao consultar o PNCP.") };
+}
+
 app.get("/api/processos/detalhes", async (req, res) => {
   const controle = String(req.query.id || "").trim();
   if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
@@ -1307,36 +1340,22 @@ app.get("/api/processos/detalhes", async (req, res) => {
     atas: buildCompraApiUrl(processoBase, "/atas")
   };
 
-  const entries = await Promise.all([
-    fetchJsonOptional(urls.contratacao),
-    fetchJsonOptional(urls.documentos),
-    fetchJsonOptional(urls.itens),
-    fetchJsonOptional(urls.historico),
-    fetchJsonOptional(urls.fontesOrcamentarias),
-    fetchJsonOptional(urls.contratos),
-    fetchJsonOptional(urls.atas)
+  // Na abertura do modal buscamos somente o essencial. Itens/histórico/contratos
+  // ficam para uma segunda chamada, evitando sete requisições simultâneas ao PNCP.
+  const [contratacao, documentos] = await Promise.all([
+    fetchJsonWithOptions(urls.contratacao, { timeoutMs: 9000, retries: 2 }),
+    fetchJsonWithOptions(urls.documentos, { timeoutMs: 9000, retries: 2 })
   ]);
 
-  const [contratacao, documentos, itens, historico, fontesOrcamentarias, contratos, atas] = entries;
   const docs = extractList(documentos.data, ["documentos", "arquivos"]);
-  const itemList = extractList(itens.data, ["itens"]);
-  const historyList = extractList(historico.data, ["listaEventos", "eventos", "historico"]);
-  const contractList = extractList(contratos.data, ["contratos", "itens", "content"]);
-  const ataList = extractList(atas.data, ["atas", "content"]);
-
   const errors = [];
-  for (const [name, result] of Object.entries({ contratacao, documentos, itens, historico, fontesOrcamentarias, contratos, atas })) {
-    if (result.error) errors.push(`${name}: ${result.error}`);
-  }
+  if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
+  if (documentos.error) errors.push(`documentos: ${documentos.error}`);
 
   res.json({
     ok: Boolean(contratacao.data),
     id: controle,
-    identificacao: {
-      cnpj: processoBase.cnpjCompra,
-      ano: processoBase.anoCompra,
-      sequencial: processoBase.sequencialCompra
-    },
+    identificacao: { cnpj: processoBase.cnpjCompra, ano: processoBase.anoCompra, sequencial: processoBase.sequencialCompra },
     contratacao: compactDetail(contratacao.data),
     documentos: docs.map(doc => ({
       sequencialDocumento: doc?.sequencialDocumento ?? doc?.sequencial_documento ?? null,
@@ -1346,13 +1365,52 @@ app.get("/api/processos/detalhes", async (req, res) => {
       dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
       url: doc?.url || doc?.link || null
     })),
-    itens: itemList,
-    historico: historyList,
-    fontesOrcamentarias: fontesOrcamentarias.data,
-    contratos: contractList,
-    atas: ataList,
+    itens: [], historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
+    extrasPendentes: true,
     endpoints: urls,
     erros: errors
+  });
+});
+
+app.get("/api/processos/detalhes-extras", async (req, res) => {
+  const controle = String(req.query.id || "").trim();
+  if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
+  const processoBase = normalizeProcesso({ numeroControlePNCP: controle });
+  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
+    return res.status(400).json({ error: "Identificador PNCP inválido." });
+  }
+  const base = buildCompraApiUrl(processoBase);
+  const urls = {
+    itens: buildCompraApiUrl(processoBase, "/itens?pagina=1&tamanhoPagina=500"),
+    historico: buildCompraApiUrl(processoBase, "/historico?pagina=1&tamanhoPagina=500"),
+    fontesOrcamentarias: buildCompraApiUrl(processoBase, "/fonte-orcamentaria"),
+    contratos: `${PNCP_API_BASE}/v1/orgaos/${encodeURIComponent(processoBase.cnpjCompra)}/contratos/contratacao/${encodeURIComponent(processoBase.anoCompra)}/${encodeURIComponent(processoBase.sequencialCompra)}`,
+    atas: buildCompraApiUrl(processoBase, "/atas")
+  };
+  const names = Object.keys(urls);
+  const results = {};
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const index = cursor++;
+      if (index >= names.length) return;
+      const name = names[index];
+      results[name] = await fetchJsonWithOptions(urls[name], { timeoutMs: 7000, retries: 1 });
+    }
+  }
+  await Promise.all([worker(), worker()]);
+
+  const erros = [];
+  for (const [name, result] of Object.entries(results)) if (result.error) erros.push(`${name}: ${result.error}`);
+  res.json({
+    ok: true,
+    itens: extractList(results.itens?.data, ["itens"]),
+    historico: extractList(results.historico?.data, ["listaEventos", "eventos", "historico"]),
+    fontesOrcamentarias: results.fontesOrcamentarias?.data || null,
+    contratos: extractList(results.contratos?.data, ["contratos", "itens", "content"]),
+    atas: extractList(results.atas?.data, ["atas", "content"]),
+    erros,
+    endpoints: urls
   });
 });
 
