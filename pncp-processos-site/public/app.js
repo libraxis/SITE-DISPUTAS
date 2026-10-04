@@ -84,8 +84,7 @@ function render() {
         </td>
         <td class="result-object">${esc(process.objeto || "—")}</td>
         <td class="result-dates">
-          <small><b>Início da recepção:</b> <span class="js-abertura">${esc(fmtDate(process.abertura))}</span></small>
-          <small><b>Fim da recepção:</b> <span class="js-encerramento">${esc(fmtDate(process.encerramento))}</span></small>
+          <span class="lazy-date-hint">Clique em <strong>Detalhes</strong> para visualizar as datas de recepção de propostas.</span>
         </td>
         <td class="result-status">
           <span class="status-pill">${esc(process.situacaoCompraNome || "Divulgada no PNCP")}</span>
@@ -102,60 +101,6 @@ function render() {
   $("#processTable tbody").querySelectorAll(".details-btn").forEach(button => {
     button.addEventListener("click", () => openDetails(Number(button.dataset.index), rows));
   });
-}
-
-async function enrichVisibleResults() {
-  const snapshot = processos.slice();
-  const queue = snapshot.map((process, index) => ({ process, index }));
-  let cursor = 0;
-  const workers = Math.min(6, queue.length);
-
-  async function worker() {
-    while (true) {
-      const item = queue[cursor++];
-      if (!item) return;
-      try {
-        const data = await api(`/api/processos/enriquecer?id=${encodeURIComponent(item.process.controlePncp)}`);
-        const enriched = data.processo || {};
-        const target = processos.find(p => p.controlePncp === enriched.controlePncp);
-        if (!target) continue;
-
-        // O endpoint de enriquecimento parte apenas do identificador PNCP.
-        // Portanto ele pode devolver os metadados como "Não informado" enquanto
-        // ainda não conseguiu recuperá-los. Nunca substitua dados bons da busca
-        // por esses placeholders. Só aplicamos valores efetivamente encontrados.
-        const placeholders = new Set([
-          "", "—", "Não informado", "Órgão não informado",
-          "Objeto não informado", "Não informada", null, undefined
-        ]);
-        const canReplace = value => !placeholders.has(value);
-
-        for (const [key, value] of Object.entries(enriched)) {
-          if (key === "enriquecimento") {
-            target.enriquecimento = value;
-            continue;
-          }
-          if (canReplace(value)) target[key] = value;
-        }
-
-        // Campos numéricos nulos não apagam um valor já encontrado.
-        if (enriched.valor !== null && enriched.valor !== undefined && enriched.valor !== "") {
-          target.valor = enriched.valor;
-        }
-        if (enriched.abertura) target.abertura = enriched.abertura;
-        if (enriched.encerramento) target.encerramento = enriched.encerramento;
-        render();
-      } catch (error) {
-        const target = processos.find(p => p.controlePncp === item.process.controlePncp);
-        if (target) {
-          target.enriquecimento = { status: "erro", erro: error.message };
-          render();
-        }
-      }
-    }
-  }
-
-  await Promise.all(Array.from({ length: workers }, worker));
 }
 
 function setupDiagnosticsToggle(){
@@ -299,7 +244,7 @@ function renderDetails(data, base) {
 
     <section class="detail-section">
       <div class="section-title-row"><h4>Itens da contratação</h4><span class="section-count">${itens.length}</span></div>
-      ${itens.length ? `<div class="items-table-wrap"><table class="items-table"><thead><tr><th>Item</th><th>Descrição</th><th>Qtd.</th><th>Unidade</th><th>Valor unit.</th><th>Valor total</th><th>Categoria</th><th>Situação</th></tr></thead><tbody>${itens.map(item => `
+      ${data.extrasPendentes ? `<div class="detail-loading-inline">Carregando itens da contratação…</div>` : itens.length ? `<div class="items-table-wrap"><table class="items-table"><thead><tr><th>Item</th><th>Descrição</th><th>Qtd.</th><th>Unidade</th><th>Valor unit.</th><th>Valor total</th><th>Categoria</th><th>Situação</th></tr></thead><tbody>${itens.map(item => `
         <tr>
           <td>${esc(item.numeroItem ?? "—")}</td>
           <td><strong>${esc(item.descricao || "—")}</strong>${item.informacaoComplementar ? `<small>${esc(item.informacaoComplementar)}</small>` : ""}</td>
@@ -315,15 +260,14 @@ function renderDetails(data, base) {
 
     <section class="detail-section">
       <h4>Fontes orçamentárias</h4>
-      <div class="raw-box">${esc(JSON.stringify(fontes || { informacao: "Não informado" }, null, 2))}</div>
+      <div class="raw-box">${data.extrasPendentes ? "Carregando…" : esc(JSON.stringify(fontes || { informacao: "Não informado" }, null, 2))}</div>
     </section>
 
-    ${atas.length ? `<section class="detail-section"><div class="section-title-row"><h4>Atas relacionadas</h4><span class="section-count">${atas.length}</span></div><div class="related-list">${atas.map(ata => `<pre>${esc(JSON.stringify(ata, null, 2))}</pre>`).join("")}</div></section>` : ""}
-    ${contratos.length ? `<section class="detail-section"><div class="section-title-row"><h4>Contratos / empenhos relacionados</h4><span class="section-count">${contratos.length}</span></div><div class="related-list">${contratos.map(item => `<pre>${esc(JSON.stringify(item, null, 2))}</pre>`).join("")}</div></section>` : ""}
+    ${data.extrasPendentes ? `<section class="detail-section"><h4>Atas e contratos relacionados</h4><div class="detail-loading-inline">Carregando atas e contratos relacionados…</div></section>` : `${atas.length ? `<section class="detail-section"><div class="section-title-row"><h4>Atas relacionadas</h4><span class="section-count">${atas.length}</span></div><div class="related-list">${atas.map(ata => `<pre>${esc(JSON.stringify(ata, null, 2))}</pre>`).join("")}</div></section>` : ""}${contratos.length ? `<section class="detail-section"><div class="section-title-row"><h4>Contratos / empenhos relacionados</h4><span class="section-count">${contratos.length}</span></div><div class="related-list">${contratos.map(item => `<pre>${esc(JSON.stringify(item, null, 2))}</pre>`).join("")}</div></section>` : ""}`}
 
     <section class="detail-section">
       <div class="section-title-row"><h4>Histórico da contratação</h4><span class="section-count">${historico.length}</span></div>
-      ${historico.length ? `<div class="history-list">${historico.map(event => `
+      ${data.extrasPendentes ? `<div class="detail-loading-inline">Carregando histórico da contratação…</div>` : historico.length ? `<div class="history-list">${historico.map(event => `
         <div class="history-row"><div class="history-date">${esc(fmtDate(event.logManutencaoDataInclusao || event.dataInclusao))}</div><div><strong>${esc(event.tipoLogManutencaoNome || "Evento")}</strong><small>${esc(event.categoriaLogManutencaoNome || "")}${event.documentoTitulo ? ` • ${esc(event.documentoTitulo)}` : ""}${event.justificativa ? ` • ${esc(event.justificativa)}` : ""}</small></div></div>
       `).join("")}</div>` : `<div class="empty-detail">Nenhum evento de histórico retornado.</div>`}
     </section>
@@ -338,12 +282,29 @@ async function openDetails(index, sourceRows = processos) {
   const process = sourceRows[index];
   if (!process) return;
   $("#detailsModal").classList.remove("hidden");
-  $("#detailsContent").innerHTML = `<div class="loading-details"><div class="spinner"></div><strong>Consultando todos os dados desta contratação no PNCP...</strong><span>Buscando dados, itens, documentos e histórico.</span></div>`;
+  $("#detailsContent").innerHTML = `<div class="loading-details"><div class="spinner"></div><strong>Carregando informações da contratação...</strong><span>Primeiro carregamos os dados principais e os documentos. Itens, histórico e vínculos são carregados em seguida.</span></div>`;
   try {
     const data = await api(`/api/processos/detalhes?id=${encodeURIComponent(process.controlePncp)}`);
     renderDetails(data, process);
+
+    // Segunda etapa, somente para o edital que o usuário abriu. Isso evita
+    // consultar PDFs/datas/itens/histórico de dezenas de resultados durante a pesquisa.
+    if (data.extrasPendentes) {
+      try {
+        const extras = await api(`/api/processos/detalhes-extras?id=${encodeURIComponent(process.controlePncp)}`);
+        renderDetails({ ...data, ...extras, extrasPendentes: false }, process);
+      } catch (extraError) {
+        renderDetails({ ...data, extrasPendentes: false, erros: [...(data.erros || []), `Dados complementares: ${extraError.message}`] }, process);
+      }
+    }
   } catch (error) {
-    $("#detailsContent").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+    // Mesmo se a API detalhada estiver indisponível, mostramos os dados que já
+    // vieram da busca para não deixar o usuário diante de uma tela vazia.
+    renderDetails({
+      ok: false, id: process.controlePncp, contratacao: null, documentos: [],
+      itens: [], historico: [], fontesOrcamentarias: null, contratos: [], atas: [],
+      extrasPendentes: false, erros: [error.message]
+    }, process);
   }
 }
 
@@ -363,7 +324,7 @@ async function search(event) {
   $("#stats").classList.add("hidden");
   $("#diagnostics").classList.add("hidden");
   $("#notice").classList.add("hidden");
-  $("#progress").textContent = "Consultando a base oficial do PNCP e localizando os editais. As datas de início e fim da recepção serão extraídas dos documentos em segundo plano...";
+  $("#progress").textContent = "Consultando a base oficial do PNCP e localizando os editais. As datas de início e fim da recepção serão consultadas somente quando você abrir os detalhes de um edital.";
 
   try {
     const data = await api(`/api/processos?uf=${encodeURIComponent(uf)}&q=${encodeURIComponent(keyword)}`);
@@ -376,9 +337,7 @@ async function search(event) {
     $("#stats").classList.remove("hidden");
     $("#results").classList.remove("hidden");
     render();
-    // Não bloqueia a exibição dos resultados: cada edital é lido em segundo plano.
-    enrichVisibleResults();
-
+  
     if (data.warnings?.length) {
       $("#notice").textContent = "A pesquisa foi concluída, mas houve avisos: " + data.warnings.join(" | ");
       $("#notice").classList.remove("hidden");

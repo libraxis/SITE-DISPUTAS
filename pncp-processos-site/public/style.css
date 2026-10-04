@@ -270,3 +270,22 @@ body.has-scroll-proxy { padding-bottom: 18px; }
 .diagnostics-content{padding:0 18px 18px}
 .diagnostics-content .card-head{margin-top:0}
 @media(max-width:700px){.diagnostics-toggle-hint{display:none}.diagnostics-content{padding:0 12px 14px}}
+
+
+/* Datas sob demanda: a pesquisa não consulta documentos de todos os resultados. */
+#processTable .lazy-date-hint {
+  display: block;
+  color: #60708a;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+#processTable .lazy-date-hint strong { color: #1d4ed8; }
+.detail-loading-inline {
+  padding: 14px 16px;
+  border-radius: 9px;
+  background: #f7f9fc;
+  color: #60708a;
+  font-size: 13px;
+}
