@@ -284,7 +284,8 @@ async function openDetails(index, sourceRows = processos) {
   $("#detailsModal").classList.remove("hidden");
   $("#detailsContent").innerHTML = `<div class="loading-details"><div class="spinner"></div><strong>Carregando informações da contratação...</strong><span>Primeiro carregamos os dados principais e os documentos. Itens, histórico e vínculos são carregados em seguida.</span></div>`;
   try {
-    const data = await api(`/api/processos/detalhes?id=${encodeURIComponent(process.controlePncp)}`);
+    const detalheFallback = encodeURIComponent(JSON.stringify(process));
+    const data = await api(`/api/processos/detalhes?id=${encodeURIComponent(process.controlePncp)}&fallback=${detalheFallback}`);
     renderDetails(data, process);
 
     // Segunda etapa, somente para o edital que o usuário abriu. Isso evita
