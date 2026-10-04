@@ -55,6 +55,7 @@ const PNCP_SEARCH = "https://pncp.gov.br/api/search/";
 const PNCP_SEARCH_ALTERNATE = "https://www.pncp.gov.br/api/search/";
 // API oficial de consulta, usada como fallback.
 const PNCP_PROPOSTA = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta";
+const PNCP_PUBLICACAO = "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao";
 const PNCP_PORTAL = "https://pncp.gov.br/app/editais";
 const PNCP_API_BASE = "https://pncp.gov.br/api/pncp";
 
@@ -128,6 +129,17 @@ function parsePncpDate(value) {
   if (/^\d{8}$/.test(raw)) return new Date(`${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}T23:59:59-03:00`);
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+
+function formatDateYYYYMMDDFromDate(date) {
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
 }
 
 function getArray(data) {
@@ -1302,6 +1314,110 @@ async function searchPortalApi(uf, keyword, diagnostics) {
   return found;
 }
 
+async function fallbackPublicacaoApi(uf, keyword, diagnostics) {
+  const found = [];
+  const hoje = new Date();
+  // Procuramos publicações recentes e depois aplicamos o filtro de propostas
+  // ainda abertas. Isso é mais confiável que /contratacoes/proposta quando o
+  // índice de oportunidades abertas do PNCP está degradado.
+  const inicio = addDays(hoje, -365);
+  const dataInicial = formatDateYYYYMMDDFromDate(inicio);
+  const dataFinal = formatDateYYYYMMDDFromDate(hoje);
+  // Inclui os códigos atuais e os códigos legados que ainda aparecem em bases
+  // históricas do PNCP.
+  const modalidades = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,99,100];
+  const maxPages = 6;
+  const tamanhoPagina = 50;
+  const stats = [];
+  let cursor = 0;
+
+  async function scan(codigo) {
+    const st = { codigo, paginas: 0, registros: 0, encontrados: 0, abertas: 0, rejeitadosTermo: 0, erros: 0 };
+    const arr = [];
+    for (let pagina = 1; pagina <= maxPages; pagina++) {
+      const params = new URLSearchParams({
+        dataInicial,
+        dataFinal,
+        codigoModalidadeContratacao: String(codigo),
+        pagina: String(pagina),
+        tamanhoPagina: String(tamanhoPagina)
+      });
+      if (uf) params.set("uf", uf);
+      try {
+        const data = await fetchJson(`${PNCP_PUBLICACAO}?${params}`);
+        const items = getArray(data);
+        st.paginas++;
+        st.registros += items.length;
+        for (const raw of items) {
+          let processo = normalizeProcesso(raw, codigo);
+          // Alguns retornos usam campos aninhados; normalizeProcesso já cobre
+          // os principais aliases. Se faltar o objeto, preservamos o texto bruto
+          // para o filtro, sem deixar isso bloquear a recuperação.
+          const rawText = normalizeText(JSON.stringify(raw));
+          const searchable = normalizeText([
+            processo.objeto, processo.complemento, processo.numero, processo.processo,
+            processo.orgao, processo.unidade, processo.municipio, processo.modalidade,
+            rawText
+          ].join(" "));
+          const terms = normalizeText(keyword).split(/\s+/).filter(Boolean);
+          const termMatch = terms.every(t => searchable.includes(t));
+          if (!termMatch) { st.rejeitadosTermo++; continue; }
+          if (uf && processo.uf && processo.uf !== uf) continue;
+          const end = parsePncpDate(processo.encerramento);
+          const start = parsePncpDate(processo.abertura);
+          // Só interessa o que ainda recebe propostas. Se a data de fim não
+          // vier no resumo, mantemos o candidato para enriquecimento posterior.
+          if (end && end.getTime() < Date.now()) continue;
+          st.abertas++;
+          if (!isDivulgada(processo)) continue;
+          st.encontrados++;
+          arr.push(processo);
+        }
+        if (!items.length || items.length < tamanhoPagina) break;
+      } catch (error) {
+        st.erros++;
+        // Um código de modalidade indisponível não deve matar o fallback inteiro.
+        break;
+      }
+    }
+    return { st, arr };
+  }
+
+  const results = new Array(modalidades.length);
+  async function worker() {
+    while (true) {
+      const i = cursor++;
+      if (i >= modalidades.length) return;
+      results[i] = await scan(modalidades[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: 6 }, worker));
+
+  const byId = new Map();
+  for (const r of results) {
+    if (!r) continue;
+    stats.push(r.st);
+    for (const p of r.arr) {
+      const id = p.controlePncp || `${p.cnpjCompra}|${p.anoCompra}|${p.sequencialCompra}`;
+      if (id && !byId.has(id)) byId.set(id, p);
+    }
+  }
+  found.push(...byId.values());
+  diagnostics.publicacaoFallback = {
+    endpoint: PNCP_PUBLICACAO,
+    dataInicial,
+    dataFinal,
+    modalidades,
+    paginasLidas: stats.reduce((n, x) => n + (x.paginas || 0), 0),
+    registrosRecebidos: stats.reduce((n, x) => n + (x.registros || 0), 0),
+    encontrados: found.length,
+    limite: `${maxPages} páginas por modalidade`,
+    tamanhoPagina,
+    modalidadesDetalhadas: stats
+  };
+  return found;
+}
+
 async function fallbackPropostaApi(uf, keyword, diagnostics) {
   const found = [];
   const dataFinal = formatDateYYYYMMDD();
@@ -1710,6 +1826,19 @@ app.get("/api/processos", async (req, res) => {
     } catch (error) {
       diagnostics.fallback = { ...(diagnostics.fallback || {}), erro: error.message, status: error.status || null };
       diagnostics.warnings.push(`Fallback /contratacoes/proposta: ${error.message}`);
+    }
+  }
+
+  // Segundo fallback: consulta por período de publicação. Esta rota é independente
+  // do índice /proposta e permite recuperar licitações recentes que continuam abertas.
+  if (processos.length === 0) {
+    try {
+      const publicados = await fallbackPublicacaoApi(uf, keyword, diagnostics);
+      processos.push(...publicados);
+      diagnostics.warnings.push("Fallback /contratacoes/publicacao executado.");
+    } catch (error) {
+      diagnostics.publicacaoFallback = { erro: error.message, status: error.status || null };
+      diagnostics.warnings.push(`Fallback /contratacoes/publicacao: ${error.message}`);
     }
   }
 
