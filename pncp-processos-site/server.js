@@ -61,7 +61,7 @@ const CACHE_MS = 2 * 60 * 1000;
 const SEARCH_PAGE_SIZE = 50;
 const SEARCH_MAX_PAGES = 20;
 const REQUEST_TIMEOUT_MS = 15000;
-const RETRIES = 2;
+const RETRIES = 4;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const GEMINI_BATCH_SIZE = 50;
 const GEMINI_TIMEOUT_MS = 45000;
@@ -162,7 +162,13 @@ async function fetchJson(url) {
       return JSON.parse(body);
     } catch (error) {
       lastError = error;
-      const retryable = error.name === "AbortError" || [429, 500, 502, 503, 504].includes(error.status);
+      // Além dos HTTP 429/5xx, o Node pode retornar "fetch failed" quando
+      // ocorre falha transitória de DNS/TLS/socket. Esse erro também deve ser
+      // repetido, pois o PNCP pode estar momentaneamente indisponível.
+      const retryable = error.name === "AbortError" ||
+        error.name === "TypeError" ||
+        /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR/i.test(String(error?.message || "")) ||
+        [429, 500, 502, 503, 504].includes(error.status);
       if (!retryable || attempt === RETRIES) throw error;
       await new Promise(resolve => setTimeout(resolve, 800 * attempt));
     } finally {
@@ -197,7 +203,13 @@ async function fetchText(url, timeoutMs = REQUEST_TIMEOUT_MS) {
       return body;
     } catch (error) {
       lastError = error;
-      const retryable = error.name === "AbortError" || [429, 500, 502, 503, 504].includes(error.status);
+      // Além dos HTTP 429/5xx, o Node pode retornar "fetch failed" quando
+      // ocorre falha transitória de DNS/TLS/socket. Esse erro também deve ser
+      // repetido, pois o PNCP pode estar momentaneamente indisponível.
+      const retryable = error.name === "AbortError" ||
+        error.name === "TypeError" ||
+        /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|UND_ERR/i.test(String(error?.message || "")) ||
+        [429, 500, 502, 503, 504].includes(error.status);
       if (!retryable || attempt === RETRIES) throw error;
       await new Promise(resolve => setTimeout(resolve, 700 * attempt));
     } finally {
@@ -219,7 +231,11 @@ async function searchPortalHtmlFallback(uf, keyword, diagnostics) {
     });
     if (uf) params.set("ufs", uf);
     const html = await fetchText(`${PNCP_PORTAL}?${params}`);
-    const matches = html.match(/\b\d{14}-\d-\d{6}\/\d{4}\b/g) || [];
+    const matches = [
+      ...(html.match(/\b\d{14}-\d-\d{6}\/\d{4}\b/g) || []),
+      ...(html.match(/\b\d{14}-\d-\d{6}\\\/\d{4}\b/g) || []).map(v => v.replace(/\\\//g, "/")),
+      ...(html.match(/numeroControlePNCP["'\s:=]+["']?(\d{14}-\d-\d{6}\/\d{4})/g) || []).map(v => (v.match(/\d{14}-\d-\d{6}\/\d{4}/) || [])[0]).filter(Boolean)
+    ];
     const uniquePage = [...new Set(matches)];
     uniquePage.forEach(id => ids.add(id));
     pageResults.push({ pagina, encontrados: uniquePage.length });
@@ -1154,48 +1170,94 @@ async function fallbackPropostaApi(uf, keyword, diagnostics) {
   let rawTotal = 0;
   let pagesRead = 0;
   let totalPages = null;
+  let matchedRaw = 0;
+  let rejectedKeyword = 0;
+  let rejectedUf = 0;
+  let detailRecovered = 0;
 
-  // Fallback limitado: a busca principal já é feita pelo endpoint /api/search.
-  // Aqui verificamos primeiro as modalidades mais comuns, evitando centenas de requisições.
-  const fallbackModalidades = [6, 4, 5, 7, 8, 9];
+  // IMPORTANTE: /contratacoes/proposta aceita a modalidade como filtro OPCIONAL.
+  // A versão anterior percorria somente [6,4,5,7,8,9], o que fazia o fallback
+  // perder contratações de outras modalidades e, em alguns momentos, retornar 0.
+  // Aqui consultamos a fila geral de propostas abertas, filtrando UF e termo no
+  // próprio aplicativo. Isso segue a definição oficial do endpoint de propostas.
+  const maxPages = 20;
+  const tamanhoPagina = 50;
 
-  for (const codigo of fallbackModalidades) {
-    for (let pagina = 1; pagina <= 2; pagina++) {
-      const params = new URLSearchParams({
-        dataFinal,
-        codigoModalidadeContratacao: String(codigo),
-        pagina: String(pagina),
-        tamanhoPagina: "50"
-      });
-      if (uf) params.set("uf", uf);
+  for (let pagina = 1; pagina <= maxPages; pagina++) {
+    const params = new URLSearchParams({
+      dataFinal,
+      pagina: String(pagina),
+      tamanhoPagina: String(tamanhoPagina)
+    });
+    if (uf) params.set("uf", uf);
 
-      const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
-      const items = getArray(data);
-      pagesRead++;
-      rawTotal += items.length;
-      totalPages = Number(data?.totalPaginas ?? data?.totalPages ?? data?.numeroPaginas ?? 0) || totalPages;
+    const data = await fetchJson(`${PNCP_PROPOSTA}?${params}`);
+    const items = getArray(data);
+    pagesRead++;
+    rawTotal += items.length;
+    totalPages = Number(data?.totalPaginas ?? data?.totalPages ?? data?.numeroPaginas ?? 0) || totalPages;
 
-      for (const raw of items) {
-        const processo = normalizeProcesso(raw, codigo);
-        if (isDivulgada(processo) && isOpen(processo) && (!uf || processo.uf === uf) && matches(processo, keyword)) found.push(processo);
+    for (const raw of items) {
+      let processo = normalizeProcesso(raw);
+
+      // O endpoint já é específico para propostas abertas. Não exigimos
+      // situacaoCompraId=1 aqui, pois alguns registros não trazem esse campo.
+      if (uf && processo.uf && processo.uf !== uf) {
+        rejectedUf++;
+        continue;
       }
 
-      if (!items.length || items.length < 50 || (totalPages && pagina >= totalPages)) break;
+      let isMatch = matches(processo, keyword);
+
+      // Alguns retornos do endpoint de proposta trazem apenas o identificador
+      // e poucos metadados. Nesse caso, consulta-se a contratação individual
+      // antes de rejeitar o termo pesquisado.
+      if (!isMatch && processo.cnpjCompra && processo.anoCompra && processo.sequencialCompra) {
+        try {
+          const detail = await fetchJson(buildCompraApiUrl(processo));
+          const detailed = normalizeProcesso(detail || raw, processo.modalidadeCodigo);
+          processo = {
+            ...processo,
+            ...detailed,
+            controlePncp: detailed.controlePncp || processo.controlePncp,
+            cnpjCompra: detailed.cnpjCompra || processo.cnpjCompra,
+            anoCompra: detailed.anoCompra || processo.anoCompra,
+            sequencialCompra: detailed.sequencialCompra || processo.sequencialCompra
+          };
+          isMatch = matches(processo, keyword);
+          if (isMatch) detailRecovered++;
+        } catch (_) {}
+      }
+
+      if (!isMatch) {
+        rejectedKeyword++;
+        continue;
+      }
+
+      matchedRaw++;
+      found.push(processo);
     }
+
+    if (!items.length || items.length < tamanhoPagina || (totalPages && pagina >= totalPages)) break;
+    await new Promise(resolve => setTimeout(resolve, 250));
   }
 
   diagnostics.fallback = {
     endpoint: PNCP_PROPOSTA,
     dataFinal,
-    modalidades: fallbackModalidades,
+    modalidades: "todas (filtro de modalidade omitido; endpoint oficial aceita filtro opcional)",
     paginasLidas: pagesRead,
     registrosRecebidos: rawTotal,
     encontrados: found.length,
-    limite: "2 páginas por modalidade"
+    limite: `${maxPages} páginas`,
+    tamanhoPagina,
+    correspondenciasAntesDeDuplicar: matchedRaw,
+    rejeitadosPorTermo: rejectedKeyword,
+    rejeitadosPorUF: rejectedUf,
+    recuperadosPorDetalhe: detailRecovered
   };
   return found;
 }
-
 
 function buildCompraApiUrl(processo, suffix = "") {
   const cnpj = String(processo?.cnpjCompra || "").trim();
