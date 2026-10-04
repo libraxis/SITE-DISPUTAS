@@ -1876,10 +1876,13 @@ app.get("/api/processos/detalhes", async (req, res) => {
   // O Chrome do usuário pode estar recebendo 503 de um host/rota do PNCP enquanto
   // outro host oficial responde normalmente. Por isso o detalhe tenta os hosts
   // oficiais em sequência antes de declarar a contratação indisponível.
+  // A consulta inicial deve ser rápida e resiliente. Documentos, itens e
+  // histórico são carregados em etapas separadas depois que o modal já abriu.
+  // A versão anterior consultava a lista de arquivos antes de responder;
+  // quando o PNCP estava lento/indisponível, a requisição inteira expirava.
   let contratacao = await fetchDetailJson(compraUrls, { timeoutMs: DETAIL_CONTRATACAO_TIMEOUT_MS });
-  const documentoResult = await fetchPncpDocumentsForEnrichment(processoBase);
   const embeddedDocs = extractDocumentList(contratacao.data);
-  const docs = documentoResult.docs?.length ? documentoResult.docs : embeddedDocs;
+  const docs = embeddedDocs;
   const errors = [];
   if (contratacao.error) errors.push(`contratacao: ${contratacao.error}`);
 
@@ -1896,8 +1899,6 @@ app.get("/api/processos/detalhes", async (req, res) => {
     };
     detalheFallback = true;
   }
-  if (documentoResult.errors?.length) errors.push(...documentoResult.errors.map(e => `documentos: ${e}`));
-
   res.json({
     ok: Boolean(contratacao.data),
     detalheFallback,
@@ -1959,16 +1960,15 @@ app.get("/api/processos/detalhes-extras", async (req, res) => {
     const erros = [];
     const urlsUtilizadas = {};
 
-    // IMPORTANTE: as consultas complementares são sequenciais. A versão anterior
-    // disparava vários endpoints simultaneamente e ainda repetia cada tentativa
-    // em vários hosts. Em períodos de rate limit do PNCP isso fazia os detalhes
-    // receberem 429 e terminarem com itens/histórico vazios.
-    for (const name of names) {
-      const result = await fetchDetailJson(urls[name], { timeoutMs: 15000 });
+    // As consultas complementares podem ser feitas em paralelo porque cada
+    // recurso tem fallback próprio. Assim, uma rota lenta do PNCP não bloqueia
+    // todas as demais e o modal consegue preencher os dados progressivamente.
+    await Promise.all(names.map(async (name) => {
+      const result = await fetchDetailJson(urls[name], { timeoutMs: 8000 });
       results[name] = result;
       urlsUtilizadas[name] = result.url || null;
       if (result?.error) erros.push(`${name}: ${result.error}`);
-    }
+    }));
 
     // Algumas respostas da contratação já trazem os itens em itensCompra.
     // Usamos isso como fallback quando a rota /itens não responder ou vier vazia.
@@ -2074,6 +2074,51 @@ app.get("/api/processos/documento", async (req, res) => {
     res.send(buffer);
   } catch (error) {
     res.status(502).send(`Falha ao processar documento do PNCP: ${error.message}`);
+  }
+});
+
+
+app.get("/api/processos/detalhes-documentos", async (req, res) => {
+  const controle = String(req.query.id || "").trim();
+  if (!controle) return res.status(400).json({ error: "Informe o id da contratação PNCP." });
+
+  let fallbackProcesso = null;
+  try {
+    const rawFallback = String(req.query.fallback || "").trim();
+    if (rawFallback) fallbackProcesso = JSON.parse(rawFallback);
+  } catch (_) {}
+
+  let processoBase = normalizeProcesso(fallbackProcesso || { numeroControlePNCP: controle });
+  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
+    processoBase = normalizeProcesso({ numeroControlePNCP: controle });
+  }
+
+  if (!processoBase.cnpjCompra || !processoBase.anoCompra || !processoBase.sequencialCompra) {
+    return res.json({
+      ok: false,
+      documentos: [],
+      erros: ["Não foi possível identificar CNPJ, ano e sequencial da contratação."]
+    });
+  }
+
+  try {
+    const result = await fetchPncpDocumentsForEnrichment(processoBase);
+    const documentos = (result.docs || []).map(doc => ({
+      sequencialDocumento: doc?.sequencialDocumento ?? doc?.sequencial_documento ?? null,
+      titulo: doc?.titulo || doc?.nome || "Documento",
+      tipoDocumentoId: doc?.tipoDocumentoId ?? doc?.tipo_documento_id ?? null,
+      tipoDocumentoNome: doc?.tipoDocumentoNome || doc?.tipo_documento_nome || "Documento",
+      dataPublicacaoPncp: doc?.dataPublicacaoPncp || doc?.data_publicacao_pncp || null,
+      url: doc?.url || doc?.urlDownload || doc?.uri || doc?.link || null
+    }));
+    res.json({ ok: true, documentos, erros: result.errors || [] });
+  } catch (error) {
+    // Falha documental nunca deve impedir a abertura dos detalhes.
+    res.json({
+      ok: false,
+      documentos: [],
+      erros: [`Documentos: ${error?.message || "Não foi possível consultar os documentos do PNCP."}`]
+    });
   }
 });
 
