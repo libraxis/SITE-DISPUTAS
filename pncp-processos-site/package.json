@@ -1,6 +1,6 @@
 {
   "name": "pncp-processos-abertos",
-  "version": "2.4.29",
+  "version": "2.4.30",
   "private": true,
   "description": "Busca de processos do PNCP com recebimento de propostas aberto",
   "main": "server.js",
