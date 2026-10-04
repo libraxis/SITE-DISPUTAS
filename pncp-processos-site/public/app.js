@@ -324,7 +324,7 @@ async function search(event) {
   $("#stats").classList.add("hidden");
   $("#diagnostics").classList.add("hidden");
   $("#notice").classList.add("hidden");
-  $("#progress").textContent = "Consultando a base oficial do PNCP e localizando os editais. As datas de início e fim da recepção serão consultadas somente quando você abrir os detalhes de um edital.";
+  $("#progress").textContent = "Consultando os editais abertos na base oficial do PNCP. Os detalhes e as datas serão carregados somente quando você clicar em “Detalhes”.";
 
   try {
     const data = await api(`/api/processos?uf=${encodeURIComponent(uf)}&q=${encodeURIComponent(keyword)}`);
