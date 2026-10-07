@@ -63,6 +63,63 @@ const CREDENTIALS_FILE = path.join(DATA_DIR, "credentials.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const SESSION_COOKIE = "st_processos_session";
 const sessions = new Map();
+const AUDIT_FILE = path.join(DATA_DIR, "audit-log.json");
+const AUDIT_MAX_ENTRIES = 100000;
+
+function ensureAuditStorage() {
+  if (!fs.existsSync(AUDIT_FILE)) fs.writeFileSync(AUDIT_FILE, "[]");
+}
+function readAuditLog() {
+  const data = readJsonFile(AUDIT_FILE, []);
+  return Array.isArray(data) ? data : [];
+}
+function writeAuditLog(entries) {
+  writeJsonFile(AUDIT_FILE, entries.slice(-AUDIT_MAX_ENTRIES));
+}
+function safeString(value, max = 500) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+function requestMetadata(req) {
+  return {
+    ip: clientIp(req),
+    userAgent: safeString(req.headers["user-agent"], 700),
+    language: safeString(req.headers["accept-language"], 300),
+    referer: safeString(req.headers.referer || req.headers.referrer, 500),
+    host: safeString(req.headers.host, 200),
+    protocol: req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http"),
+    forwardedFor: safeString(req.headers["x-forwarded-for"], 700),
+    country: safeString(req.headers["cf-ipcountry"], 20),
+    region: safeString(req.headers["cf-region"], 100),
+    city: safeString(req.headers["cf-ipcity"], 150),
+    ray: safeString(req.headers["cf-ray"], 150),
+    requestId: safeString(req.headers["x-request-id"], 150)
+  };
+}
+function audit(user, action, details = {}, req = null, extra = {}) {
+  try {
+    const entry = {
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      action: safeString(action, 120),
+      role: user?.role || "anonymous",
+      username: safeString(user?.username || "—", 160),
+      name: safeString(user?.name || "—", 240),
+      details,
+      ...(req ? requestMetadata(req) : {}),
+      ...extra
+    };
+    const log = readAuditLog();
+    log.push(entry);
+    writeAuditLog(log);
+  } catch (error) {
+    originalConsoleError("Falha ao registrar auditoria:", error);
+  }
+}
+function auditAction(req, action, details = {}, extra = {}) {
+  audit(req.userSession, action, details, req, extra);
+}
+ensureAuditStorage();
 
 function ensureAuthStorage() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -129,12 +186,13 @@ function createSession(role, username, name, req) {
   const token = crypto.randomBytes(32).toString("hex");
   sessions.set(token, {
     role, username, name: name || username, ip: clientIp(req),
-    createdAt: Date.now(), expiresAt: Date.now() + 8 * 60 * 60 * 1000
+    createdAt: Date.now(), lastSeenAt: Date.now(), lastPath: "/",
+    telemetry: {}, expiresAt: Date.now() + 8 * 60 * 60 * 1000
   });
   return token;
 }
 function publicSession(session) {
-  return session ? { authenticated: true, role: session.role, username: session.username, name: session.name, ip: session.ip } : { authenticated: false };
+  return session ? { authenticated: true, role: session.role, username: session.username, name: session.name, ip: session.ip, createdAt: session.createdAt, lastSeenAt: session.lastSeenAt, lastPath: session.lastPath } : { authenticated: false };
 }
 function maintenanceMessage() {
   return "O site está fechado para manutenções, somente o administrador pode ter acesso. Tente novamente em alguns minutos ou entre em contato com a administração.";
@@ -159,15 +217,23 @@ app.post("/api/auth/login", (req, res) => {
   if (username === "adm" && password === "RAESK") {
     const token = createSession("admin", "adm", "Administrador", req);
     setSessionCookie(res, token);
+    audit(sessions.get(token), "LOGIN_SUCESSO", { metodo: "credencial administrativa" }, req);
     return res.json({ ok: true, user: publicSession(sessions.get(token)), maintenance: readSettings().maintenance });
   }
 
-  if (readSettings().maintenance) return res.status(423).json({ error: maintenanceMessage(), code: "MAINTENANCE" });
+  if (readSettings().maintenance) {
+    audit(null, "LOGIN_BLOQUEADO_MANUTENCAO", { username }, req);
+    return res.status(423).json({ error: maintenanceMessage(), code: "MAINTENANCE" });
+  }
 
   const user = readCredentials().users.find(item => normalizeLogin(item.cnpj) === username);
-  if (!user || !verifyPassword(password, user)) return res.status(401).json({ error: "CNPJ ou senha inválidos", code: "INVALID_CREDENTIALS" });
+  if (!user || !verifyPassword(password, user)) {
+    audit(null, "LOGIN_FALHOU", { username }, req);
+    return res.status(401).json({ error: "CNPJ ou senha inválidos", code: "INVALID_CREDENTIALS" });
+  }
   const token = createSession("user", user.cnpj, user.nomeEmpresa || user.cnpj, req);
   setSessionCookie(res, token);
+  audit(sessions.get(token), "LOGIN_SUCESSO", { metodo: "credencial de empresa" }, req);
   res.json({ ok: true, user: publicSession(sessions.get(token)), maintenance: false });
 });
 
@@ -184,7 +250,7 @@ app.get("/api/auth/me", (req, res) => {
 
 app.post("/api/auth/logout", (req, res) => {
   const session = getSession(req);
-  if (session) sessions.delete(session.token);
+  if (session) { audit(session, "LOGOUT", {}, req); sessions.delete(session.token); }
   clearSessionCookie(res);
   res.json({ ok: true });
 });
@@ -200,7 +266,72 @@ app.get("/api/auth/status", (req, res) => {
   res.json({ ok: true, user: publicSession(session), maintenance: settings.maintenance });
 });
 
-app.use("/api/processos", requireAuth);
+app.post("/api/telemetry", requireAuth, (req, res) => {
+  const session = req.userSession;
+  const payload = req.body?.telemetry && typeof req.body.telemetry === "object" ? req.body.telemetry : {};
+  session.lastSeenAt = Date.now();
+  session.lastPath = safeString(payload.path || req.headers.referer || "/", 500);
+  session.telemetry = {
+    ...session.telemetry,
+    ...Object.fromEntries(Object.entries(payload).slice(0, 40).map(([k,v]) => [k, typeof v === "string" ? safeString(v, 500) : v]))
+  };
+  if (payload.event) auditAction(req, safeString(payload.event, 120), payload.details || {}, { clientEvent: true, telemetry: payload.event === "TELEMETRIA" ? undefined : payload });
+  res.json({ ok: true });
+});
+
+app.get("/api/admin/dashboard", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const log = readAuditLog();
+  const now = Date.now();
+  const users = [];
+  for (const [token, session] of sessions) {
+    if (session.expiresAt <= now) { sessions.delete(token); continue; }
+    users.push({ token, username: session.username, name: session.name, role: session.role, ip: session.ip, since: session.createdAt, lastSeenAt: session.lastSeenAt, lastPath: session.lastPath, telemetry: session.telemetry || {} });
+  }
+  const companies = readCredentials().users;
+  const count = action => log.filter(e => e.action === action).length;
+  const searches = log.filter(e => e.action === "CONSULTA_PROCESSOS");
+  const downloads = log.filter(e => e.action === "DOWNLOAD_DOCUMENTO");
+  const byUser = new Map();
+  for (const e of log) if (e.role === "user") byUser.set(e.username, (byUser.get(e.username) || 0) + 1);
+  const topUsers = [...byUser.entries()].sort((a,b)=>b[1]-a[1]).slice(0,15).map(([username, total])=>({username,total}));
+  const topActions = [...log.reduce((m,e)=>m.set(e.action,(m.get(e.action)||0)+1), new Map()).entries()].sort((a,b)=>b[1]-a[1]).slice(0,20).map(([action,total])=>({action,total}));
+  const browsers = [...log.reduce((m,e)=>{ if(e.userAgent) m.set(e.userAgent,(m.get(e.userAgent)||0)+1); return m; },new Map()).entries()].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([userAgent,total])=>({userAgent,total}));
+  res.json({
+    generatedAt:new Date().toISOString(), registeredUsers:companies.length, activeUsers:users.length,
+    activeCommonUsers:users.filter(u=>u.role==="user").length, activeAdmins:users.filter(u=>u.role==="admin").length,
+    auditEntries:log.length, successfulLogins:count("LOGIN_SUCESSO"), failedLogins:count("LOGIN_FALHOU"), maintenanceBlocks:count("LOGIN_BLOQUEADO_MANUTENCAO"),
+    searches:searches.length, documentDownloads:downloads.length, logouts:count("LOGOUT"), apiRequests:count("API_REQUEST"),
+    uniqueIps:new Set(log.map(e=>e.ip).filter(Boolean)).size, uniqueUserAgents:new Set(log.map(e=>e.userAgent).filter(Boolean)).size,
+    topUsers, topActions, browsers, recent:log.slice(-50).reverse(), active:users,
+    actionCounts:{ searches:searches.length, downloads:downloads.length, details:count("ABRIU_DETALHES"), telemetry:count("TELEMETRIA"), apiRequests:count("API_REQUEST") }
+  });
+});
+
+app.get("/api/admin/audit", requireAuth, (req, res) => {
+  if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
+  const log = readAuditLog();
+  const action = String(req.query.action || "").trim();
+  const username = String(req.query.username || "").trim().toLowerCase();
+  const ip = String(req.query.ip || "").trim();
+  const from = req.query.from ? Date.parse(String(req.query.from)) : NaN;
+  const to = req.query.to ? Date.parse(String(req.query.to)) + 86400000 - 1 : NaN;
+  const filtered = log.filter(e => (!action || e.action === action) && (!username || String(e.username).toLowerCase().includes(username)) && (!ip || String(e.ip).includes(ip)) && (Number.isNaN(from) || Date.parse(e.at)>=from) && (Number.isNaN(to) || Date.parse(e.at)<=to));
+  const limit = Math.min(Math.max(Number(req.query.limit)||500,1),2000);
+  res.json({ total:filtered.length, actions:[...new Set(log.map(e=>e.action))].sort(), entries:filtered.slice(-limit).reverse() });
+});
+
+app.use("/api/processos", (req, res, next) => {
+  const started = Date.now();
+  res.on("finish", () => {
+    if (req.userSession) {
+      const details = { method:req.method, path:req.path, status:res.statusCode, durationMs:Date.now()-started, query:{} };
+      for (const key of ["uf","q","id","documento"]) if (req.query[key] !== undefined) details.query[key] = safeString(req.query[key], 500);
+      auditAction(req, req.path.includes("documento") ? "DOWNLOAD_DOCUMENTO" : req.path.includes("detalhes") ? "ABRIU_DETALHES" : (req.path === "/" ? "CONSULTA_PROCESSOS" : "PROCESSO_API"), details);
+    }
+  });
+  next();
+}, requireAuth);
 app.use("/api/pncp-url", requireAuth);
 
 app.get("/api/admin/credentials", requireAuth, (req, res) => {
@@ -220,6 +351,7 @@ app.post("/api/admin/credentials", requireAuth, (req, res) => {
   const hp = hashPassword(senha);
   data.users.push({ cnpj, nomeEmpresa, passwordSalt: hp.salt, passwordHash: hp.hash, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
   writeCredentials(data.users);
+  auditAction(req, "ADMIN_CRIU_EMPRESA", { cnpj, nomeEmpresa });
   res.json({ ok: true });
 });
 
@@ -244,6 +376,7 @@ app.put("/api/admin/credentials/:cnpj", requireAuth, (req, res) => {
   writeCredentials(data.users);
   // Se o CNPJ foi alterado, derruba sessões antigas desse usuário para forçar novo login.
   for (const [token, session] of sessions) if (session.role === "user" && normalizeLogin(session.username) === normalizeLogin(original)) sessions.delete(token);
+  auditAction(req, "ADMIN_ALTEROU_EMPRESA", { originalCnpj: original, novoCnpj: newCnpj, nomeEmpresa });
   res.json({ ok: true });
 });
 
@@ -256,6 +389,7 @@ app.delete("/api/admin/credentials/:cnpj", requireAuth, (req, res) => {
   data.users = data.users.filter(item => normalizeLogin(item.cnpj) !== normalizeLogin(cnpj));
   writeCredentials(data.users);
   for (const [token, session] of sessions) if (session.role === "user" && normalizeLogin(session.username) === normalizeLogin(cnpj)) sessions.delete(token);
+  auditAction(req, "ADMIN_EXCLUIU_EMPRESA", { cnpj });
   res.json({ ok: true });
 });
 
@@ -271,6 +405,7 @@ app.post("/api/admin/maintenance", requireAuth, (req, res) => {
   if (enabled) {
     for (const [token, session] of sessions) if (session.role !== "admin") sessions.delete(token);
   }
+  auditAction(req, enabled ? "MANUTENCAO_ATIVADA" : "MANUTENCAO_DESATIVADA", { enabled });
   res.json({ ok: true, maintenance: enabled });
 });
 
@@ -280,7 +415,7 @@ app.get("/api/admin/active-users", requireAuth, (req, res) => {
   const users = [];
   for (const [token, session] of sessions) {
     if (session.expiresAt <= now) { sessions.delete(token); continue; }
-    users.push({ token, username: session.username, name: session.name, role: session.role, ip: session.ip, since: session.createdAt });
+    users.push({ token, username: session.username, name: session.name, role: session.role, ip: session.ip, since: session.createdAt, lastSeenAt: session.lastSeenAt, lastPath: session.lastPath, telemetry: session.telemetry || {} });
   }
   res.json({ users });
 });
@@ -289,7 +424,7 @@ app.post("/api/admin/active-users/:token/logout", requireAuth, (req, res) => {
   if (req.userSession.role !== "admin") return res.status(403).json({ error: "Acesso restrito ao administrador." });
   const token = String(req.params.token || "");
   const target = sessions.get(token);
-  if (target && target.role !== "admin") sessions.delete(token);
+  if (target && target.role !== "admin") { auditAction(req, "ADMIN_DESLOGOU_USUARIO", { username:target.username, ip:target.ip }); sessions.delete(token); }
   res.json({ ok: true });
 });
 
