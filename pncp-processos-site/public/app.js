@@ -4,6 +4,40 @@ let authPollTimer = null;
 
 const $ = selector => document.querySelector(selector);
 
+// Formata CNPJ visualmente, mas mantém somente os dígitos para autenticação/API.
+function formatCnpj(value) {
+  const raw = String(value ?? "").replace(/\D/g, "").slice(0, 14);
+  if (!raw) return "";
+  if (raw.length <= 2) return raw;
+  if (raw.length <= 5) return `${raw.slice(0, 2)}-${raw.slice(2)}`;
+  if (raw.length <= 8) return `${raw.slice(0, 2)}-${raw.slice(2, 5)}-${raw.slice(5)}`;
+  if (raw.length <= 12) return `${raw.slice(0, 2)}-${raw.slice(2, 5)}-${raw.slice(5, 8)}/${raw.slice(8)}`;
+  return `${raw.slice(0, 2)}-${raw.slice(2, 5)}-${raw.slice(5, 8)}/${raw.slice(8, 12)}-${raw.slice(12, 14)}`;
+}
+
+function cnpjDigits(value) {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+function setupCnpjMasks() {
+  ["#loginCnpj", "#credentialCnpj", "#credentialDetailsCnpj"].forEach(selector => {
+    const input = $(selector);
+    if (!input || input.dataset.cnpjMaskReady) return;
+    input.dataset.cnpjMaskReady = "1";
+    input.addEventListener("input", () => {
+      // O usuário administrativo continua podendo digitar exatamente `adm`.
+      if (input.value.trim().toLowerCase() === "adm" || !/\d/.test(input.value)) {
+        if (input.value.trim().toLowerCase() === "adm") input.value = "adm";
+        return;
+      }
+      input.value = formatCnpj(input.value);
+    });
+    input.addEventListener("blur", () => {
+      if (input.value.trim().toLowerCase() !== "adm") input.value = formatCnpj(input.value);
+    });
+  });
+}
+
 function showLogin(message = "") {
   currentUser = null;
   document.body.classList.add("app-locked");
@@ -429,7 +463,8 @@ async function login(event) {
   event?.preventDefault();
   const btn = $("#loginBtn");
   const message = $("#loginMessage");
-  const cnpj = $("#loginCnpj").value.trim();
+  const cnpjInput = $("#loginCnpj").value.trim();
+  const cnpj = cnpjInput.toLowerCase() === "adm" ? "adm" : cnpjDigits(cnpjInput);
   const senha = $("#loginPassword").value;
   if (!cnpj || !senha) return;
   btn.disabled = true; btn.textContent = "Entrando...";
@@ -491,7 +526,7 @@ async function loadCredentials() {
   try {
     const data = await api("/api/admin/credentials");
     body.innerHTML = data.users.length ? data.users.map(user => `
-      <tr><td><strong>${esc(user.nomeEmpresa || "—")}</strong></td><td>${esc(user.cnpj)}</td><td><div class="table-actions"><button class="ghost credential-edit" data-cnpj="${esc(user.cnpj)}" type="button">Detalhes</button><button class="danger-btn credential-delete" data-cnpj="${esc(user.cnpj)}" type="button">Excluir</button></div></td></tr>
+      <tr><td><strong>${esc(user.nomeEmpresa || "—")}</strong></td><td>${esc(user.cnpj.toLowerCase() === "adm" ? "adm" : formatCnpj(user.cnpj))}</td><td><div class="table-actions"><button class="ghost credential-edit" data-cnpj="${esc(user.cnpj)}" type="button">Detalhes</button><button class="danger-btn credential-delete" data-cnpj="${esc(user.cnpj)}" type="button">Excluir</button></div></td></tr>
     `).join("") : `<tr><td colspan="3" class="empty">Nenhuma empresa cadastrada.</td></tr>`;
     body.querySelectorAll(".credential-edit").forEach(btn => btn.addEventListener("click", () => editCredential(btn.dataset.cnpj)));
     body.querySelectorAll(".credential-delete").forEach(btn => btn.addEventListener("click", () => deleteCredential(btn.dataset.cnpj)));
@@ -505,7 +540,7 @@ async function editCredential(cnpj) {
     if (!user) return;
 
     $("#credentialDetailsOriginalCnpj").value = user.cnpj;
-    $("#credentialDetailsCnpj").value = user.cnpj;
+    $("#credentialDetailsCnpj").value = user.cnpj.toLowerCase() === "adm" ? "adm" : formatCnpj(user.cnpj);
     $("#credentialDetailsCompany").value = user.nomeEmpresa || "";
     $("#credentialDetailsPasswordDisplay").value = "••••••••";
     $("#credentialDetailsNewPassword").value = "";
@@ -539,7 +574,7 @@ async function saveCredentialDetails(event) {
   event.preventDefault();
   const original = $("#credentialDetailsOriginalCnpj").value.trim();
   const payload = {
-    cnpj: $("#credentialDetailsCnpj").value.trim(),
+    cnpj: (() => { const value = $("#credentialDetailsCnpj").value.trim(); return value.toLowerCase() === "adm" ? "adm" : cnpjDigits(value); })(),
     nomeEmpresa: $("#credentialDetailsCompany").value.trim(),
     senha: $("#credentialDetailsNewPassword").value
   };
@@ -577,7 +612,8 @@ async function deleteCredentialFromDetails() {
 async function saveCredential(event) {
   event.preventDefault();
   const original = $("#credentialOriginalCnpj").value.trim();
-  const payload = { cnpj: $("#credentialCnpj").value.trim(), nomeEmpresa: $("#credentialCompany").value.trim(), senha: $("#credentialPassword").value };
+  const cnpjInput = $("#credentialCnpj").value.trim();
+  const payload = { cnpj: cnpjInput.toLowerCase() === "adm" ? "adm" : cnpjDigits(cnpjInput), nomeEmpresa: $("#credentialCompany").value.trim(), senha: $("#credentialPassword").value };
   const btn = $("#credentialSaveBtn"); btn.disabled = true;
   try {
     await api(original ? `/api/admin/credentials/${encodeURIComponent(original)}` : "/api/admin/credentials", { method: original ? "PUT" : "POST", body: JSON.stringify(payload) });
@@ -697,6 +733,7 @@ document.addEventListener("keydown", event => {
 
 
 window.currentView = "buscar";
+setupCnpjMasks();
 checkAuth();
 
 // Barra horizontal fixa sincronizada com a tabela de resultados
