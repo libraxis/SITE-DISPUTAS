@@ -1,6 +1,7 @@
 let processos = [];
 let currentUser = null;
 let authPollTimer = null;
+let telemetryTimer = null;
 
 const $ = selector => document.querySelector(selector);
 
@@ -60,21 +61,75 @@ function hideLogin(user) {
     badge.classList.remove("hidden");
   }
   document.querySelectorAll(".admin-only").forEach(el => el.classList.toggle("hidden", user?.role !== "admin"));
-  if (user?.role !== "admin" && ["credenciais","manutencao"].includes(window.currentView)) switchView("buscar");
+  if (user?.role !== "admin" && ["credenciais","manutencao","dashboard","auditoria"].includes(window.currentView)) switchView("buscar");
+  if (user) startTelemetry();
+}
+
+function collectTelemetry(event = "TELEMETRIA", details = {}) {
+  if (!currentUser) return null;
+  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  return {
+    event,
+    details,
+    path: location.pathname + location.search,
+    href: location.href.slice(0, 1000),
+    title: document.title,
+    referrer: document.referrer,
+    userAgent: navigator.userAgent,
+    platform: navigator.platform,
+    vendor: navigator.vendor,
+    language: navigator.language,
+    languages: Array.isArray(navigator.languages) ? navigator.languages.slice(0, 10) : [],
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    timezoneOffset: new Date().getTimezoneOffset(),
+    screenWidth: screen.width,
+    screenHeight: screen.height,
+    availWidth: screen.availWidth,
+    availHeight: screen.availHeight,
+    colorDepth: screen.colorDepth,
+    pixelDepth: screen.pixelDepth,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio,
+    hardwareConcurrency: navigator.hardwareConcurrency || null,
+    deviceMemory: navigator.deviceMemory || null,
+    maxTouchPoints: navigator.maxTouchPoints || 0,
+    cookieEnabled: navigator.cookieEnabled,
+    doNotTrack: navigator.doNotTrack,
+    online: navigator.onLine,
+    pdfViewerEnabled: navigator.pdfViewerEnabled,
+    connection: connection ? { effectiveType: connection.effectiveType, downlink: connection.downlink, rtt: connection.rtt, saveData: connection.saveData } : null
+  };
+}
+function sendTelemetry(event = "TELEMETRIA", details = {}) {
+  if (!currentUser) return;
+  const telemetry = collectTelemetry(event, details);
+  fetch("/api/telemetry", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ telemetry }), keepalive:true }).catch(()=>{});
+}
+function startTelemetry() {
+  clearInterval(telemetryTimer);
+  sendTelemetry("SESSAO_INICIADA");
+  telemetryTimer = setInterval(() => sendTelemetry("TELEMETRIA"), 30000);
+  window.addEventListener("online", () => sendTelemetry("REDE_ONLINE"));
+  window.addEventListener("offline", () => sendTelemetry("REDE_OFFLINE"));
 }
 
 function switchView(view) {
-  const allowed = view === "buscar" || (currentUser?.role === "admin" && ["credenciais","manutencao"].includes(view));
+  const adminViews = ["credenciais","manutencao","dashboard","auditoria"];
+  const allowed = view === "buscar" || (currentUser?.role === "admin" && adminViews.includes(view));
   if (!allowed) view = "buscar";
   window.currentView = view;
   document.querySelectorAll(".view").forEach(el => el.classList.add("hidden"));
   const target = document.getElementById(`${view}View`);
   if (target) target.classList.remove("hidden");
   document.querySelectorAll(".nav").forEach(el => el.classList.toggle("active", el.dataset.view === view));
-  const title = { buscar: "Buscar processos", credenciais: "Administrar credenciais", manutencao: "Configurações / manutenção" }[view] || "STZ Licita Master - Painel";
+  const title = { buscar: "Buscar processos", credenciais: "Administrar credenciais", manutencao: "Configurações / manutenção", dashboard: "Dashboard de utilização", auditoria: "Log de atividades" }[view] || "STZ Licita Master - Painel";
   const h1 = document.querySelector(".topbar h1"); if (h1) h1.textContent = title;
   if (view === "credenciais") loadCredentials();
   if (view === "manutencao") loadMaintenancePanel();
+  if (view === "dashboard") loadDashboard();
+  if (view === "auditoria") loadAuditLog();
+  if (currentUser) sendTelemetry("NAVEGOU_MENU", { view });
 }
 
 async function handleAuthFailure(errorData) {
@@ -376,6 +431,7 @@ function renderDetails(data, base) {
 async function openDetails(index, sourceRows = processos) {
   const process = sourceRows[index];
   if (!process) return;
+  sendTelemetry("ABRIU_DETALHES", { controlePncp: process.controlePncp, numero: process.numero });
   $("#detailsModal").classList.remove("hidden");
   $("#detailsContent").innerHTML = `<div class="loading-details"><div class="spinner"></div><strong>Carregando informações da contratação...</strong><span>Primeiro carregamos os dados principais e os documentos. Itens, histórico e vínculos são carregados em seguida.</span></div>`;
   try {
@@ -650,6 +706,51 @@ async function loadActiveUsers() {
   } catch (error) { body.innerHTML = `<tr><td colspan="4" class="empty">${esc(error.message)}</td></tr>`; }
 }
 
+function formatJsonShort(value, max = 700) {
+  try { const text = JSON.stringify(value); return text.length > max ? text.slice(0, max) + "…" : text; } catch (_) { return String(value); }
+}
+function telemetrySummary(t) {
+  if (!t || !Object.keys(t).length) return "—";
+  const ua = t.userAgent ? t.userAgent.replace(/\s+/g," ").slice(0,180) : "—";
+  return `${ua}<br><small>${esc(t.platform || "—")} • ${esc(t.screenWidth || "?")}×${esc(t.screenHeight || "?")} • DPR ${esc(t.devicePixelRatio || "?")} • ${esc(t.timezone || "?")} • ${esc(t.hardwareConcurrency || "?")} cores</small>`;
+}
+async function loadDashboard() {
+  if (currentUser?.role !== "admin") return;
+  try {
+    const data = await api("/api/admin/dashboard");
+    const cards = [
+      ["EMPRESAS",data.registeredUsers],["ONLINE",data.activeUsers],["CONSULTAS",data.searches],["DOWNLOADS",data.documentDownloads],
+      ["LOGINS OK",data.successfulLogins],["LOGINS FALHOS",data.failedLogins],["EVENTOS",data.auditEntries],["IPS ÚNICOS",data.uniqueIps],
+      ["USUÁRIOS ONLINE",data.activeCommonUsers],["ADMIN ONLINE",data.activeAdmins],["DETALHES ABERTOS",data.actionCounts.details],["REQ. API",data.apiRequests]
+    ];
+    $("#dashboardCards").innerHTML = cards.map(([label,value])=>`<div class="admin-stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("");
+    $("#dashboardActiveBody").innerHTML = data.active.length ? data.active.map(u=>`<tr><td><strong>${esc(u.name)}</strong><small>${esc(u.username)} • ${esc(u.role)}</small></td><td>${esc(u.ip)}</td><td>${esc(fmtDate(u.since))}</td><td>${esc(fmtDate(u.lastSeenAt))}</td><td>${esc(u.lastPath || "—")}</td><td>${telemetrySummary(u.telemetry)}</td></tr>`).join("") : `<tr><td colspan="6" class="empty">Nenhum usuário conectado.</td></tr>`;
+    $("#dashboardActions").innerHTML = data.topActions.map(x=>`<div class="metric-row"><span>${esc(x.action)}</span><strong>${esc(x.total)}</strong></div>`).join("") || `<div class="empty">Sem dados.</div>`;
+    $("#dashboardUsers").innerHTML = data.topUsers.map(x=>`<div class="metric-row"><span>${esc(x.username)}</span><strong>${esc(x.total)}</strong></div>`).join("") || `<div class="empty">Sem dados.</div>`;
+    const activeTelemetry = data.active.map(x=>x.telemetry||{});
+    const zones = [...new Set(activeTelemetry.map(x=>x.timezone).filter(Boolean))];
+    const platforms = [...new Set(activeTelemetry.map(x=>x.platform).filter(Boolean))];
+    const languages = [...new Set(activeTelemetry.map(x=>x.language).filter(Boolean))];
+    const connection = [...new Set(activeTelemetry.map(x=>x.connection?.effectiveType).filter(Boolean))];
+    $("#dashboardTechnical").innerHTML = [["Fusos ativos",zones.join(", ")||"—"],["Plataformas",platforms.join(", ")||"—"],["Idiomas",languages.join(", ")||"—"],["Conexões",connection.join(", ")||"—"],["Agentes únicos",data.uniqueUserAgents],["IPs únicos",data.uniqueIps]].map(([a,b])=>`<div><span>${esc(a)}</span><strong>${esc(b)}</strong></div>`).join("");
+    $("#dashboardRecentBody").innerHTML = data.recent.map(e=>`<tr><td>${esc(fmtDate(e.at))}</td><td>${esc(e.name)}<small>${esc(e.username)}</small></td><td><strong>${esc(e.action)}</strong></td><td>${esc(e.ip||"—")}</td><td><small>${esc(formatJsonShort(e.details,600))}</small></td></tr>`).join("") || `<tr><td colspan="5" class="empty">Sem atividade.</td></tr>`;
+  } catch (error) { toast(error.message,true); }
+}
+async function loadAuditLog() {
+  if (currentUser?.role !== "admin") return;
+  const params = new URLSearchParams();
+  const action=$("#auditActionFilter").value, user=$("#auditUserFilter").value.trim(), ip=$("#auditIpFilter").value.trim(), from=$("#auditFromFilter").value, to=$("#auditToFilter").value;
+  if(action) params.set("action",action); if(user) params.set("username",user); if(ip) params.set("ip",ip); if(from) params.set("from",from); if(to) params.set("to",to); params.set("limit","2000");
+  try {
+    const data=await api(`/api/admin/audit?${params.toString()}`);
+    const select=$("#auditActionFilter"); const current=select.value;
+    if(select.options.length<=1) data.actions.forEach(a=>{const o=document.createElement("option");o.value=a;o.textContent=a;select.appendChild(o);});
+    select.value=current;
+    $("#auditCount").textContent=`${data.total} evento(s) encontrado(s)`;
+    $("#auditBody").innerHTML=data.entries.length?data.entries.map(e=>`<tr><td>${esc(fmtDate(e.at))}</td><td><strong>${esc(e.name)}</strong><small>${esc(e.username)} • ${esc(e.role)}</small></td><td><strong>${esc(e.action)}</strong></td><td>${esc(e.ip||"—")}</td><td>${esc([e.country,e.region,e.city].filter(Boolean).join(" / ")||"Não informado")}</td><td title="${esc(e.userAgent||"")}">${esc((e.userAgent||"—").slice(0,110))}</td><td><details><summary>Ver</summary><pre>${esc(formatJsonShort({details:e.details,client:e.telemetry,requestId:e.requestId},2500))}</pre></details></td></tr>`).join(""): `<tr><td colspan="7" class="empty">Nenhum evento encontrado.</td></tr>`;
+  } catch(error){toast(error.message,true);}
+}
+
 async function toggleMaintenance() {
   const enabled = $("#maintenanceToggle").checked;
   try { await api("/api/admin/maintenance", { method: "POST", body: JSON.stringify({ enabled }) }); toast(enabled ? "Site fechado para manutenção. Usuários comuns foram deslogados." : "Site reaberto."); await loadActiveUsers(); }
@@ -671,7 +772,9 @@ async function search(event) {
   $("#progress").textContent = "Consultando os editais abertos na base oficial do PNCP. Os detalhes e as datas serão carregados somente quando você clicar em “Detalhes”.";
 
   try {
+    sendTelemetry("CONSULTA_INICIADA", { uf, keyword });
     const data = await api(`/api/processos?uf=${encodeURIComponent(uf)}&q=${encodeURIComponent(keyword)}`);
+    sendTelemetry("CONSULTA_CONCLUIDA", { uf, keyword, resultados: (data.processos || []).length });
     processos = data.processos || [];
     renderDiagnostics(data);
     $("#statTotal").textContent = processos.length;
@@ -713,6 +816,9 @@ $("#credentialDetailsCancelPasswordBtn").addEventListener("click", cancelCredent
 $("#credentialDetailsDeleteBtn").addEventListener("click", deleteCredentialFromDetails);
 $("#maintenanceToggle").addEventListener("change", toggleMaintenance);
 $("#refreshActiveUsersBtn").addEventListener("click", loadActiveUsers);
+$("#refreshDashboardBtn").addEventListener("click", loadDashboard);
+$("#refreshAuditBtn").addEventListener("click", loadAuditLog);
+$("#applyAuditFilter").addEventListener("click", loadAuditLog);
 document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
 $("#searchForm").addEventListener("submit", search);
 $("#resultFilter").addEventListener("input", render);

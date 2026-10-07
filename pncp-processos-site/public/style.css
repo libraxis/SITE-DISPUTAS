@@ -419,3 +419,16 @@ input:focus, select:focus, textarea:focus { border-color: #8b5cf6; box-shadow: 0
 @media (max-width: 900px) {
   .sidebar { border-right: 0; border-bottom: 1px solid #27232f; }
 }
+
+/* Painéis MASTER: dashboard e auditoria */
+.admin-stats-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-top:18px}
+.admin-stat{padding:15px;border:1px solid #302d3a;border-radius:11px;background:#17171c;min-height:82px}
+.admin-stat span{display:block;font-size:9px;letter-spacing:.08em;color:#918b9d;text-transform:uppercase;font-weight:800}
+.admin-stat strong{display:block;margin-top:7px;font-size:25px;color:#f5f1ff}
+.admin-dashboard-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.admin-dashboard-grid .full-width{grid-column:1/-1}
+.metric-list{display:grid;gap:8px}.metric-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #302d3a;font-size:11px}.metric-row strong{color:#b995ff}.tech-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.tech-grid>div{padding:10px;border:1px solid #302d3a;border-radius:9px}.tech-grid span{display:block;color:#918b9d;font-size:9px;text-transform:uppercase}.tech-grid strong{display:block;margin-top:4px;font-size:11px;overflow-wrap:anywhere}
+.audit-filters{display:grid;grid-template-columns:1.3fr 1.3fr 1fr 1fr 1fr auto;gap:10px;align-items:end;margin-top:18px}.audit-filters label{font-size:10px;color:#918b9d;text-transform:uppercase;font-weight:800}.audit-filters input,.audit-filters select{display:block;width:100%;margin-top:6px}
+.audit-table-wrap{max-height:70vh}.admin-table small{display:block;color:#918b9d;margin-top:3px;font-size:9px}.admin-table details summary{cursor:pointer;color:#b995ff;font-weight:700}.admin-table details pre{white-space:pre-wrap;word-break:break-word;max-width:520px;max-height:300px;overflow:auto;margin:8px 0 0;padding:9px;background:#101014;border-radius:8px;font-size:9px;color:#d7d1df}
+@media (max-width:1200px){.admin-stats-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.audit-filters{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:800px){.admin-stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-dashboard-grid{grid-template-columns:1fr}.admin-dashboard-grid .full-width{grid-column:auto}.audit-filters{grid-template-columns:1fr 1fr}.tech-grid{grid-template-columns:1fr}}

@@ -37,6 +37,8 @@
       <button class="nav active" data-view="buscar">BUSCAR PROCESSOS</button>
       <button class="nav admin-only hidden" data-view="credenciais">ADMINISTRAR CREDENCIAIS</button>
       <button class="nav admin-only hidden" data-view="manutencao">CONFIGURAÇÕES/MANUTENÇÃO</button>
+      <button class="nav admin-only hidden" data-view="dashboard">DASHBOARD DE UTILIZAÇÃO</button>
+      <button class="nav admin-only hidden" data-view="auditoria">LOG DE ATIVIDADES</button>
     </nav>
 
     <div class="sidebar-bottom">
@@ -230,6 +232,28 @@
         <div class="card-head"><div><h3>Empresas cadastradas</h3><span class="muted">Credenciais autorizadas a acessar o sistema.</span></div><button id="refreshCredentialsBtn" class="ghost" type="button">Atualizar</button></div>
         <div class="table-wrap"><table class="admin-table"><thead><tr><th>Empresa</th><th>CNPJ / usuário</th><th>Ação</th></tr></thead><tbody id="credentialsTableBody"><tr><td colspan="3" class="empty">Carregando...</td></tr></tbody></table></div>
       </div>
+    </section>
+
+    <section id="dashboardView" class="view hidden">
+      <div class="card admin-hero">
+        <div class="card-head"><div><div class="eyebrow">ADMINISTRAÇÃO MASTER</div><h3>Dashboard de utilização</h3><span class="muted">Visão operacional, técnica e comportamental dos acessos registrados.</span></div><button id="refreshDashboardBtn" class="ghost" type="button">Atualizar</button></div>
+        <div id="dashboardCards" class="admin-stats-grid"></div>
+      </div>
+      <div class="admin-dashboard-grid">
+        <div class="card"><div class="card-head"><div><h3>Usuários conectados agora</h3><span class="muted">Dados técnicos da sessão e do navegador.</span></div></div><div class="table-wrap"><table class="admin-table"><thead><tr><th>Usuário</th><th>IP</th><th>Entrada</th><th>Último sinal</th><th>Página</th><th>Navegador / dispositivo</th></tr></thead><tbody id="dashboardActiveBody"><tr><td colspan="6" class="empty">Carregando...</td></tr></tbody></table></div></div>
+        <div class="card"><div class="card-head"><div><h3>Principais ações</h3></div></div><div id="dashboardActions" class="metric-list"></div></div>
+        <div class="card"><div class="card-head"><div><h3>Usuários mais ativos</h3></div></div><div id="dashboardUsers" class="metric-list"></div></div>
+        <div class="card"><div class="card-head"><div><h3>Perfil técnico dos clientes</h3><span class="muted">Informações fornecidas pelo navegador.</span></div></div><div id="dashboardTechnical" class="tech-grid"></div></div>
+        <div class="card full-width"><div class="card-head"><div><h3>Atividade recente</h3></div></div><div class="table-wrap"><table class="admin-table"><thead><tr><th>Data/hora</th><th>Usuário</th><th>Ação</th><th>IP</th><th>Detalhes</th></tr></thead><tbody id="dashboardRecentBody"></tbody></table></div></div>
+      </div>
+    </section>
+
+    <section id="auditoriaView" class="view hidden">
+      <div class="card admin-hero">
+        <div class="card-head"><div><div class="eyebrow">ADMINISTRAÇÃO MASTER</div><h3>Log absoluto de atividades</h3><span class="muted">Registro detalhado de acessos, ações, requisições, sessões e telemetria técnica.</span></div><button id="refreshAuditBtn" class="ghost" type="button">Atualizar</button></div>
+        <div class="audit-filters"><label>Ação<select id="auditActionFilter"><option value="">Todas</option></select></label><label>Usuário<input id="auditUserFilter" placeholder="CNPJ / usuário"></label><label>IP<input id="auditIpFilter" placeholder="IP"></label><label>Data inicial<input id="auditFromFilter" type="date"></label><label>Data final<input id="auditToFilter" type="date"></label><button id="applyAuditFilter" class="primary" type="button">Filtrar</button></div>
+      </div>
+      <div class="card"><div class="card-head"><div><h3>Eventos registrados</h3><span id="auditCount" class="muted">—</span></div></div><div class="table-wrap audit-table-wrap"><table class="admin-table"><thead><tr><th>Data/hora</th><th>Usuário</th><th>Ação</th><th>IP</th><th>Local técnico</th><th>Navegador</th><th>Detalhes</th></tr></thead><tbody id="auditBody"><tr><td colspan="7" class="empty">Carregando...</td></tr></tbody></table></div></div>
     </section>
 
     <section id="manutencaoView" class="view hidden">
