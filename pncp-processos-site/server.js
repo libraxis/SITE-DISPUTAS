@@ -2575,6 +2575,174 @@ app.get("/api/processos/enriquecer", async (req, res) => {
   }
 });
 
+// Análise de edital sob demanda: localiza a contratação pelo número, lê documentos oficiais e estrutura uma assessoria assistida por IA.
+const editalAnalysisCache = new Map();
+function normalizeIdentifier(value) {
+  return String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+}
+function analysisCandidateMatches(processo, query) {
+  const q = normalizeIdentifier(query);
+  if (!q) return false;
+  const values = [processo?.numero, processo?.processo, processo?.controlePncp, processo?.numeroControlePNCP]
+    .map(normalizeIdentifier).filter(Boolean);
+  return values.some(value => value === q || (q.length >= 5 && value.includes(q)) || (value.length >= 5 && q.includes(value)));
+}
+function analysisString(value, max = 18000) { return String(value ?? "").slice(0, max); }
+
+app.post("/api/analise-edital", requireAuth, async (req, res) => {
+  const processNumber = String(req.body?.numeroProcesso || "").trim();
+  if (processNumber.length < 2) return res.status(400).json({ error: "Informe o número do processo ou edital." });
+  if (processNumber.length > 120) return res.status(400).json({ error: "O número informado é muito longo." });
+  if (!GEMINI_ENABLED) return res.status(503).json({ error: "A análise por IA ainda não está habilitada no servidor. Configure a variável GEMINI_API_KEY no ambiente do Licita Master; nenhuma credencial de usuário precisa ser alterada." });
+
+  const cacheKey = normalizeIdentifier(processNumber);
+  const cached = editalAnalysisCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 15 * 60 * 1000) return res.json({ ...cached.data, cache: true });
+
+  try {
+    let candidates = [];
+    const queryHosts = [PNCP_SEARCH, PNCP_SEARCH_ALTERNATE];
+    for (const endpoint of queryHosts) {
+      const params = new URLSearchParams({ tipos_documento: "edital", q: processNumber, ordenacao: "-data", pagina: "1", tam_pagina: "50" });
+      try {
+        const response = await fetchJsonWithOptions(`${endpoint}?${params}`, { timeoutMs: 14000, retries: 1 });
+        const items = getArray(response.data);
+        const mapped = items.map(raw => normalizeProcesso(raw)).filter(p => analysisCandidateMatches(p, processNumber));
+        candidates.push(...mapped);
+        if (candidates.length) break;
+      } catch (_) { /* tenta o host oficial alternativo */ }
+    }
+
+    // Se o usuário digitou o identificador de controle PNCP completo, tenta recuperar o registro pelo identificador.
+    if (!candidates.length && /\d{14}.*\d{4}/.test(processNumber)) {
+      const compact = processNumber.trim();
+      const possible = normalizeProcesso({ numeroControlePNCP: compact, controlePncp: compact, numero: compact });
+      if (possible.cnpjCompra && possible.anoCompra && possible.sequencialCompra) candidates.push(possible);
+    }
+    const unique = new Map();
+    for (const p of candidates) unique.set(p.controlePncp || `${p.numero}|${p.processo}|${p.orgao}`, p);
+    candidates = [...unique.values()];
+    if (!candidates.length) {
+      auditAction(req, "ANALISE_EDITAL_NAO_LOCALIZADO", { numeroProcesso: safeString(processNumber, 120) });
+      return res.status(404).json({ error: "Não encontrei uma contratação correspondente no índice público do PNCP. Confira o número digitado; se for o número administrativo interno do órgão, tente também o número da contratação ou do edital publicado no PNCP." });
+    }
+    if (candidates.length > 1) {
+      return res.status(409).json({ error: "Encontrei mais de uma contratação compatível com esse número. Informe o número completo do edital/contratação ou o identificador PNCP para evitar analisar o processo errado.", opcoes: candidates.slice(0, 8).map(p => ({ numero: p.numero, processo: p.processo, controlePncp: p.controlePncp, orgao: p.orgao, uf: p.uf, objeto: p.objeto, link: p.link })) });
+    }
+
+    const processo = candidates[0];
+    let contratacao = null;
+    const compraUrl = buildCompraApiUrl(processo);
+    if (compraUrl) {
+      const detail = await fetchJsonOptional(compraUrl);
+      contratacao = detail.data;
+      if (!contratacao) {
+        for (const url of buildCompraApiUrls(processo)) {
+          const alternate = await fetchJsonOptional(url);
+          if (alternate.data) { contratacao = alternate.data; break; }
+        }
+      }
+    }
+    if (contratacao && typeof contratacao === "object") {
+      const org = contratacao.orgaoEntidade || {};
+      const unidade = contratacao.unidadeOrgao || {};
+      processo.orgao = processo.orgao || org.razaoSocial || org.nome || "Órgão não informado";
+      processo.unidade = processo.unidade || unidade.nomeUnidade || unidade.nome || "";
+      processo.uf = processo.uf || unidade.ufSigla || org.ufSigla || "";
+      processo.municipio = processo.municipio || unidade.municipioNome || "";
+      processo.objeto = processo.objeto || contratacao.objetoCompra || "Objeto não informado";
+      processo.processo = processo.processo || contratacao.processo || "";
+      processo.numero = processo.numero || contratacao.numeroCompra || contratacao.numeroEdital || "";
+    }
+
+    // Os itens podem estar publicados em uma rota própria, separada do resumo da contratação.
+    let itemData = extractDetailItems(contratacao);
+    if (!itemData.length) {
+      for (const url of buildCompraApiUrls(processo, "/itens")) {
+        const result = await fetchJsonOptional(url);
+        if (result.data) {
+          itemData = extractDetailItems(result.data);
+          if (itemData.length) break;
+        }
+      }
+    }
+    const docsResult = await fetchPncpDocumentsForEnrichment(processo);
+    const docs = Array.isArray(docsResult.docs) ? docsResult.docs : [];
+    const editalRead = docs.length ? await chooseAndReadEdital(processo, docs) : null;
+    const textCandidates = (Array.isArray(editalRead?.candidates) && editalRead.candidates.length ? editalRead.candidates : (editalRead ? [editalRead] : []))
+      .filter(c => c && c.text).slice(0, 5);
+    const totalDocText = textCandidates.map(c => `DOCUMENTO: ${c.doc?.titulo || c.doc?.nome || "Documento oficial"}\nFONTE: ${c.url || c.doc?.url || "URL não disponível"}\n${analysisString(c.text, 26000)}`).join("\n\n--- PRÓXIMO DOCUMENTO ---\n\n").slice(0, 90000);
+
+    const metadata = {
+      numeroProcessoSolicitado: processNumber,
+      numeroEdital: processo.numero || contratacao?.numeroCompra || contratacao?.numeroEdital || null,
+      processoAdministrativo: processo.processo || contratacao?.processo || null,
+      identificadorPNCP: processo.controlePncp || contratacao?.numeroControlePNCP || null,
+      orgao: contratacao?.orgaoEntidade?.razaoSocial || processo.orgao || null,
+      unidadeCompradora: contratacao?.unidadeOrgao?.nomeUnidade || processo.unidade || null,
+      cnpjOrgao: contratacao?.orgaoEntidade?.cnpj || null,
+      uf: contratacao?.unidadeOrgao?.ufSigla || processo.uf || null,
+      municipio: contratacao?.unidadeOrgao?.municipioNome || processo.municipio || null,
+      objeto: contratacao?.objetoCompra || processo.objeto || null,
+      modalidade: contratacao?.modalidadeNome || processo.modalidade || null,
+      modoDisputa: contratacao?.modoDisputaNome || processo.modoDisputaNome || null,
+      situacao: contratacao?.situacaoCompraNome || processo.situacaoCompraNome || null,
+      valorEstimado: contratacao?.valorTotalEstimado ?? processo.valor ?? null,
+      valorHomologado: contratacao?.valorTotalHomologado ?? processo.valorHomologado ?? null,
+      inicioPropostas: contratacao?.dataAberturaProposta || contratacao?.dataInicioRecebimentoProposta || processo.abertura || null,
+      fimPropostas: contratacao?.dataEncerramentoProposta || contratacao?.dataFimRecebimentoProposta || processo.encerramento || null,
+      criterioJulgamento: contratacao?.criterioJulgamentoNome || null,
+      amparoLegal: contratacao?.amparoLegal?.nome || contratacao?.amparoLegalDescricao || null,
+      linkPNCP: processo.link || (processo.controlePncp ? `https://pncp.gov.br/app/editais/${processo.controlePncp}` : "https://pncp.gov.br/app/editais"),
+      documentosPublicados: docs.map(d => ({ titulo: d.titulo || d.nome || "Documento", tipo: d.tipoDocumentoNome || "Documento", url: d.url || null })),
+      itensEncontradosNaContratacao: itemData || []
+    };
+
+    const schema = {
+      type: "object",
+      properties: {
+        resumoExecutivo: { type: "string" },
+        recomendacaoParticipacao: { type: "string" },
+        nivelAtencao: { type: "string", enum: ["BAIXO", "MODERADO", "ALTO", "CRÍTICO", "INDETERMINADO"] },
+        objetoEmLinguagemSimples: { type: "string" },
+        requisitosHabilitacao: { type: "array", items: { type: "string" } },
+        documentosPreparar: { type: "array", items: { type: "string" } },
+        itensEEspecificacoes: { type: "array", items: { type: "string" } },
+        prazosEDatas: { type: "array", items: { type: "string" } },
+        criteriosJulgamentoELances: { type: "array", items: { type: "string" } },
+        custosEFormacaoPreco: { type: "array", items: { type: "string" } },
+        entregaPagamentoEGarantias: { type: "array", items: { type: "string" } },
+        riscosEPontosAtencao: { type: "array", items: { type: "string" } },
+        checklistAntesDaProposta: { type: "array", items: { type: "string" } },
+        checklistDuranteDisputa: { type: "array", items: { type: "string" } },
+        checklistAposResultado: { type: "array", items: { type: "string" } },
+        perguntasParaEsclarecimento: { type: "array", items: { type: "string" } },
+        dadosNaoLocalizados: { type: "array", items: { type: "string" } },
+        fontesEReferencias: { type: "array", items: { type: "string" } }
+      },
+      required: ["resumoExecutivo", "recomendacaoParticipacao", "nivelAtencao", "objetoEmLinguagemSimples", "requisitosHabilitacao", "documentosPreparar", "itensEEspecificacoes", "prazosEDatas", "criteriosJulgamentoELances", "custosEFormacaoPreco", "entregaPagamentoEGarantias", "riscosEPontosAtencao", "checklistAntesDaProposta", "checklistDuranteDisputa", "checklistAposResultado", "perguntasParaEsclarecimento", "dadosNaoLocalizados", "fontesEReferencias"]
+    };
+    const prompt = `Você é um analista experiente de compras públicas que prepara uma assessoria prática para um fornecedor licitante. Analise apenas os fatos e documentos fornecidos. Não invente exigências, datas, valores, páginas ou conclusões. Se algo não constar, diga que não foi localizado e inclua em dadosNaoLocalizados. Diferencie informação explícita no edital de recomendação operacional. Aponte conflitos entre dados da contratação e documentos. Não garanta vitória, habilitação ou conformidade jurídica. Quando possível, cite o nome do arquivo e a página/trecho que fundamenta cada ponto. Produza uma análise clara e acionável em português brasileiro.\n\nMETADADOS OFICIAIS (podem estar incompletos):\n${JSON.stringify(metadata, null, 2)}\n\nDOCUMENTOS EXTRAÍDOS:\n${totalDocText || "Não foi possível extrair texto dos documentos publicados. Faça análise somente dos metadados e indique claramente a limitação."}\n\nOrganize: resumo; recomendação condicional de participação; requisitos de habilitação; documentos a preparar; itens e especificações; prazos; critério e regras de lances; formação de preço e custos; entrega/pagamento/garantias; riscos e cláusulas que merecem revisão; checklists antes/durante/depois; perguntas para esclarecimento; lacunas e fontes. O usuário quer apoio prático, mas não omita limitações do material disponível.`;
+    const analysis = await callGemini({ contents: [{ role: "user", parts: [{ text: prompt }] }], schema, timeoutMs: 90000 });
+    const result = {
+      ok: true,
+      geradoEm: new Date().toISOString(),
+      cache: false,
+      processo: metadata,
+      analise: analysis,
+      documentosLidos: textCandidates.map(c => ({ titulo: c.doc?.titulo || c.doc?.nome || "Documento oficial", url: c.url || c.doc?.url || null, caracteresExtraidos: c.text.length })),
+      documentosEncontrados: docs.length,
+      avisos: [...(docsResult.errors || []), ...(!textCandidates.length ? ["Não foi possível extrair texto dos anexos; a análise se baseia apenas nos metadados disponíveis."] : []), ...(docs.length > textCandidates.length ? [`Foram localizados ${docs.length} documentos; o texto foi extraído de ${textCandidates.length} documento(s) priorizado(s).`] : [])]
+    };
+    editalAnalysisCache.set(cacheKey, { at: Date.now(), data: result });
+    auditAction(req, "ANALISE_EDITAL_CONCLUIDA", { numeroProcesso: safeString(processNumber, 120), identificadorPNCP: metadata.identificadorPNCP, documentosEncontrados: docs.length, documentosLidos: textCandidates.length });
+    return res.json(result);
+  } catch (error) {
+    auditAction(req, "ANALISE_EDITAL_ERRO", { numeroProcesso: safeString(processNumber, 120), erro: safeString(error.message, 500) });
+    return res.status(502).json({ error: `Não foi possível concluir a análise do edital: ${error.message}` });
+  }
+});
+
 app.get("/api/processos", async (req, res) => {
   const uf = String(req.query.uf || "").trim().toUpperCase();
   const keyword = String(req.query.q || "").trim();
