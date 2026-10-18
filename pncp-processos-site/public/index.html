@@ -35,6 +35,7 @@
 
     <nav>
       <button class="nav active" data-view="buscar">BUSCAR PROCESSOS</button>
+      <button class="nav" data-view="analise">ANALISE DE EDITAIS</button>
       <button class="nav admin-only hidden" data-view="credenciais">ADMINISTRAR CREDENCIAIS</button>
       <button class="nav admin-only hidden" data-view="manutencao">CONFIGURAÇÕES/MANUTENÇÃO</button>
       <button class="nav admin-only hidden" data-view="dashboard">DASHBOARD DE UTILIZAÇÃO</button>
@@ -214,6 +215,21 @@
           </table>
         </div>
       </div>
+    </section>
+
+    <section id="analiseView" class="view hidden">
+      <div class="card supplier-hero">
+        <div class="card-head"><div><div class="eyebrow">ASSESSORIA INTELIGENTE</div><h3>Análise completa de editais com IA</h3></div></div>
+        <p class="muted">Informe o número do processo, edital ou contratação. O Licita Master tentará localizar os dados e documentos oficiais, analisar as exigências e organizar os próximos passos para a empresa fornecedora.</p>
+        <form id="analysisForm" class="supplier-search">
+          <div class="grow"><label for="analysisProcessNumber">Número do processo / edital / contratação</label><input id="analysisProcessNumber" minlength="2" maxlength="120" placeholder="Ex.: 123/2026 ou número do processo administrativo" required></div>
+          <button id="analysisBtn" class="primary" type="submit">Analisar edital com IA</button>
+        </form>
+        <div class="supplier-source">A análise depende da disponibilidade dos documentos publicados pelo órgão. Confira sempre as fontes oficiais e as versões/retificações do edital antes de apresentar proposta.</div>
+      </div>
+      <div id="analysisLoading" class="card hidden"><div class="notice">Localizando o processo e analisando os documentos oficiais...</div><p id="analysisProgress" class="muted">Esta etapa pode levar alguns minutos, dependendo da quantidade e do tamanho dos anexos.</p></div>
+      <div id="analysisNotice" class="notice hidden" role="status"></div>
+      <div id="analysisResults" class="analysis-results hidden"></div>
     </section>
 
     <section id="credenciaisView" class="view hidden">

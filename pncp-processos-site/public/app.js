@@ -116,20 +116,107 @@ function startTelemetry() {
 
 function switchView(view) {
   const adminViews = ["credenciais","manutencao","dashboard","auditoria"];
-  const allowed = view === "buscar" || (currentUser?.role === "admin" && adminViews.includes(view));
+  const sharedViews = ["buscar", "analise"];
+  const allowed = sharedViews.includes(view) || (currentUser?.role === "admin" && adminViews.includes(view));
   if (!allowed) view = "buscar";
   window.currentView = view;
   document.querySelectorAll(".view").forEach(el => el.classList.add("hidden"));
   const target = document.getElementById(`${view}View`);
   if (target) target.classList.remove("hidden");
   document.querySelectorAll(".nav").forEach(el => el.classList.toggle("active", el.dataset.view === view));
-  const title = { buscar: "Buscar processos", credenciais: "Administrar credenciais", manutencao: "Configurações / manutenção", dashboard: "Dashboard de utilização", auditoria: "Log de atividades" }[view] || "STZ Licita Master - Painel";
+  const title = { buscar: "Buscar processos", analise: "Análise de editais", credenciais: "Administrar credenciais", manutencao: "Configurações / manutenção", dashboard: "Dashboard de utilização", auditoria: "Log de atividades" }[view] || "STZ Licita Master - Painel";
   const h1 = document.querySelector(".topbar h1"); if (h1) h1.textContent = title;
   if (view === "credenciais") loadCredentials();
   if (view === "manutencao") loadMaintenancePanel();
   if (view === "dashboard") loadDashboard();
   if (view === "auditoria") loadAuditLog();
   if (currentUser) sendTelemetry("NAVEGOU_MENU", { view });
+}
+
+function analysisList(title, values) {
+  const items = Array.isArray(values) ? values.filter(v => String(v ?? "").trim()) : [];
+  return `<section class="analysis-card"><h3>${esc(title)}</h3>${items.length ? `<ul class="analysis-list">${items.map(item => `<li>${esc(item)}</li>`).join("")}</ul>` : `<div class="analysis-empty">Não localizado nos dados disponíveis.</div>`}</section>`;
+}
+function analysisTextCard(title, value) {
+  return `<section class="analysis-card"><h3>${esc(title)}</h3><p>${esc(value || "Não foi possível determinar com os dados disponíveis.")}</p></section>`;
+}
+function renderEditalAnalysis(data) {
+  const p = data.processo || {};
+  const a = data.analise || {};
+  const docs = Array.isArray(p.documentosPublicados) ? p.documentosPublicados : [];
+  const readDocs = Array.isArray(data.documentosLidos) ? data.documentosLidos : [];
+  const links = [...docs.map(d => ({ title: d.titulo || "Documento oficial", url: d.url })), ...readDocs.map(d => ({ title: d.titulo || "Documento analisado", url: d.url }))]
+    .filter((d, i, arr) => d.url && arr.findIndex(x => x.url === d.url) === i);
+  const meta = [
+    ["Órgão", p.orgao], ["Unidade", p.unidadeCompradora], ["UF / Município", [p.uf, p.municipio].filter(Boolean).join(" / ")],
+    ["Edital / contratação", p.numeroEdital], ["Processo administrativo", p.processoAdministrativo], ["Modalidade", p.modalidade],
+    ["Modo de disputa", p.modoDisputa], ["Situação", p.situacao], ["Valor estimado", p.valorEstimado == null ? null : (typeof p.valorEstimado === "number" ? p.valorEstimado.toLocaleString("pt-BR", {style:"currency",currency:"BRL"}) : p.valorEstimado)],
+    ["Início das propostas", p.inicioPropostas], ["Fim das propostas", p.fimPropostas], ["Identificador PNCP", p.identificadorPNCP]
+  ];
+  const sections = [
+    analysisTextCard("Resumo executivo", a.resumoExecutivo),
+    analysisTextCard("Recomendação para o fornecedor", a.recomendacaoParticipacao),
+    analysisTextCard("Objeto em linguagem simples", a.objetoEmLinguagemSimples),
+    analysisList("Habilitação exigida", a.requisitosHabilitacao),
+    analysisList("Documentos para preparar", a.documentosPreparar),
+    analysisList("Itens e especificações", a.itensEEspecificacoes),
+    analysisList("Prazos e datas", a.prazosEDatas),
+    analysisList("Critérios de julgamento e lances", a.criteriosJulgamentoELances),
+    analysisList("Formação de preço e custos", a.custosEFormacaoPreco),
+    analysisList("Entrega, pagamento e garantias", a.entregaPagamentoEGarantias),
+    analysisList("Riscos e pontos de atenção", a.riscosEPontosAtencao),
+    analysisList("Checklist antes de enviar a proposta", a.checklistAntesDaProposta),
+    analysisList("Checklist durante a disputa", a.checklistDuranteDisputa),
+    analysisList("Checklist após o resultado", a.checklistAposResultado),
+    analysisList("Perguntas para esclarecimento", a.perguntasParaEsclarecimento),
+    analysisList("Informações que não foram localizadas", a.dadosNaoLocalizados)
+  ].join("");
+  const warnings = Array.isArray(data.avisos) ? data.avisos : [];
+  $("#analysisResults").innerHTML = `
+    <div class="analysis-card">
+      <div class="analysis-header"><div><div class="eyebrow">RELATÓRIO DE ASSESSORIA</div><h2>${esc(p.objeto || p.numeroEdital || "Análise do edital")}</h2><span class="muted">Gerado em ${esc(new Date(data.geradoEm || Date.now()).toLocaleString("pt-BR"))}</span></div><div class="analysis-actions"><span class="analysis-status">ATENÇÃO: REVISAR ANTES DE PARTICIPAR</span><button id="analysisPrintBtn" class="ghost" type="button">Imprimir / salvar PDF</button></div></div>
+      <div class="analysis-meta">${meta.map(([label,value]) => `<div><span>${esc(label)}</span><strong>${esc(value || "Não informado")}</strong></div>`).join("")}</div>
+      <p class="muted" style="margin-top:14px">Nível de atenção indicado pela IA: <strong>${esc(a.nivelAtencao || "INDETERMINADO")}</strong></p>
+      <p><a href="${esc(p.linkPNCP || "https://pncp.gov.br/app/editais")}" target="_blank" rel="noopener">Abrir contratação no PNCP ↗</a></p>
+    </div>
+    <div class="analysis-grid">${sections}</div>
+    <div class="analysis-card analysis-sources"><h3>Documentos e fontes oficiais</h3>${links.length ? `<ul class="analysis-list">${links.map(d => `<li><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)} ↗</a></li>`).join("")}</ul>` : `<div class="analysis-empty">Não foi possível obter links diretos para os anexos. Consulte a página oficial do PNCP.</div>`}<p class="muted">Documentos localizados: ${Number(data.documentosEncontrados || 0)} · Documentos com texto extraído: ${readDocs.length}</p></div>
+    ${warnings.length ? `<div class="analysis-card"><h3>Avisos sobre a análise</h3><ul class="analysis-list">${warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+    <div class="analysis-disclaimer"><strong>Importante:</strong> esta análise é um apoio automatizado, não uma garantia de habilitação, vitória ou parecer jurídico. Confira o edital completo, seus anexos, eventuais retificações e as informações diretamente no portal oficial. Se houver conflito ou ausência de informação, prevalecem os documentos oficiais e a validação do responsável pela proposta.</div>`;
+  $("#analysisResults").classList.remove("hidden");
+  $("#analysisPrintBtn")?.addEventListener("click", () => window.print());
+}
+async function analyzeEdital(event) {
+  event.preventDefault();
+  const input = $("#analysisProcessNumber");
+  const button = $("#analysisBtn");
+  const loading = $("#analysisLoading");
+  const notice = $("#analysisNotice");
+  const results = $("#analysisResults");
+  const numeroProcesso = input.value.trim();
+  if (!numeroProcesso) return;
+  button.disabled = true;
+  button.textContent = "Analisando...";
+  loading.classList.remove("hidden");
+  notice.classList.add("hidden");
+  results.classList.add("hidden");
+  try {
+    const data = await api("/api/analise-edital", { method: "POST", body: JSON.stringify({ numeroProcesso }) });
+    renderEditalAnalysis(data);
+    toast("Análise do edital concluída.");
+  } catch (error) {
+    const data = error?.data || {};
+    notice.textContent = data.error || error.message || "Não foi possível analisar este edital.";
+    if (Array.isArray(data.opcoes) && data.opcoes.length) {
+      notice.innerHTML = `${esc(data.error || "Selecione a contratação correta:")}<ul class="analysis-list">${data.opcoes.map(p => `<li><button type="button" class="ghost analysis-option" data-value="${esc(p.controlePncp || p.numero || "")}">${esc(p.numero || p.processo || p.controlePncp || "Contratação")} — ${esc(p.orgao || "Órgão não informado")} (${esc(p.uf || "UF não informada")})</button><p>${esc(p.objeto || "Objeto não informado")}</p></li>`).join("")}</ul>`;
+      notice.querySelectorAll(".analysis-option").forEach(btn => btn.addEventListener("click", () => { input.value = btn.dataset.value; $("#analysisForm").requestSubmit(); }));
+    }
+    notice.classList.remove("hidden");
+  } finally {
+    loading.classList.add("hidden");
+    button.disabled = false;
+    button.textContent = "Analisar edital com IA";
+  }
 }
 
 async function handleAuthFailure(errorData) {
@@ -166,7 +253,7 @@ async function api(url, options = {}) {
     }
     const detail = data.error || data.message || `HTTP ${response.status}`;
     const error = new Error(`Falha ao consultar os detalhes: ${detail}`);
-    error.status = response.status; error.code = data.code;
+    error.status = response.status; error.code = data.code; error.data = data;
     throw error;
   }
   return data;
@@ -821,6 +908,7 @@ $("#refreshAuditBtn").addEventListener("click", loadAuditLog);
 $("#applyAuditFilter").addEventListener("click", loadAuditLog);
 document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
 $("#searchForm").addEventListener("submit", search);
+$("#analysisForm").addEventListener("submit", analyzeEdital);
 $("#resultFilter").addEventListener("input", render);
 $("#refreshBtn").addEventListener("click", () => { if ($("#keyword").value.trim()) search({ preventDefault() {} }); });
 $("#closeDetails").addEventListener("click", closeDetails);
